@@ -8,12 +8,16 @@
 // implementation and shares no code with any C library.
 //
 // Supported features:
-//   - VHD fixed and dynamic disk parsing
-//   - VHDX disk parsing with metadata
-//   - Block Allocation Table (BAT) lookup and resolution
-//   - Differencing (child) disk support
-//   - Checksum verification
-//   - Multi-sector reading
+//   - VHD fixed, dynamic and differencing disks
+//   - VHDX fixed, dynamic and differencing disks
+//   - Sector-granular differencing resolution across a parent chain
+//   - Automatic parent chain resolution, verified against each child's metadata
+//   - VHDX log replay into a read-only in-memory overlay
+//   - Sparse-aware extent mapping with per-link provenance
+//   - Per-format checksum verification
+//
+// Reads are read-only throughout: no code path writes to an image, and log
+// replay is applied to an overlay so a forensic copy stays byte-identical.
 //
 // Example usage:
 //
