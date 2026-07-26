@@ -538,19 +538,33 @@ VHD checksum defect fixed in v0.2.0.
 
 ### Validating against real images
 
-Synthetic fixtures cannot prove agreement with what real producers emit. To
-cross-validate, generate authentic images with Hyper-V and raw ground-truth dumps
-with `qemu-img`, then point the corpus tests at them:
+Synthetic fixtures cannot prove agreement with what other implementations emit —
+a parser and a fixture written by the same author can be wrong together. Two
+generators produce a corpus of real images with raw ground truth:
+
+**qemu-img, no elevation required.** qemu can *create* VHD and VHDX, so a known
+raw pattern is converted into an image and the pattern becomes the ground truth:
 
 ```
-# Requires an elevated session (New-VHD) and qemu-img on PATH.
-pwsh -File scripts/gen-corpus.ps1 -OutputDir C:\corpus
+# Needs only qemu-img on PATH (scoop install qemu / winget install qemu).
+pwsh -File scripts/gen-corpus-qemu.ps1 -OutputDir C:\corpus
 
 $env:LIBVHDI_CORPUS = "C:\corpus"
 go test ./reader/ -run TestCorpus -v
 ```
 
-The corpus tests compare the decoded stream byte for byte against the raw dump
-and probe block and sector boundaries with random-access reads. They skip when
-`LIBVHDI_CORPUS` is unset. `TestCorpusHarnessSelfCheck` keeps the harness itself
-covered in environments that lack the tooling.
+This covers both subformats in both formats, VHDX block sizes from 1 MB to 32 MB,
+CHS-rounded VHD sizes, block-unaligned virtual sizes, all-sparse disks and a
+512 MB disk. All of it decodes byte for byte. See the 0.6.0 changelog entry for
+the results, including the one place where this library and qemu disagree and why
+this library is the conformant one.
+
+**Hyper-V, requires elevation.** `scripts/gen-corpus.ps1` drives `New-VHD`, which
+is the only route to a producer-generated *differencing chain* — qemu-img reports
+"Backing file not supported" for both formats. Chain correctness otherwise rests
+on the spec-derived fixtures.
+
+The corpus tests compare the decoded stream byte for byte and probe block and
+sector boundaries with random-access reads. They skip when `LIBVHDI_CORPUS` is
+unset, and `TestCorpusHarnessSelfCheck` keeps the harness itself covered where
+the tooling is absent.

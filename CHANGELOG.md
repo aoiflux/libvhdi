@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] - 2026-07-26
 
-Closes the outstanding items from the original plan, except the corpus run and
-release tagging.
+Closes the outstanding items from the original plan except release tagging, and
+validates the library against images produced by an independent implementation
+for the first time.
 
 ### Added
 
@@ -68,6 +69,42 @@ release tagging.
   Keeping it only advertised an abstraction that does not exist. Removing an
   exported type is a breaking change; under semantic versioning for 0.x this is
   permitted in a minor release, and nothing in this module referenced it.
+
+### Validated against real images
+
+The library had never read an image it did not produce itself. It now has.
+
+`scripts/gen-corpus-qemu.ps1` uses **qemu-img as an independent producer** and
+needs no elevation, which is what made this possible: qemu can *create* VHD and
+VHDX, so a known raw pattern is converted into an image and the pattern becomes
+the ground truth. If this library decodes the image back to the original bytes,
+two independently written implementations agree.
+
+All 14 generated images decode byte for byte, sequentially and by random access
+across block and sector boundaries:
+
+| Coverage | Cases |
+| --- | --- |
+| Subformats | VHD fixed, VHD dynamic, VHDX fixed, VHDX dynamic |
+| VHDX block sizes | 1 MB, 2 MB, 8 MB (qemu default), 32 MB |
+| CHS-rounded VHD | 10 MB pattern in a 10514432-byte disk, tail decoding as zeroes |
+| Block-unaligned | 5 MB + 512 virtual size, final block past the end of the device |
+| All-sparse | 32 MB device stored in a 2560-byte VHD |
+| Large | 512 MB device, 512 blocks |
+
+**Interop finding.** On the one image where the two disagree, this library is the
+spec-conformant one. For a fixed VHD, qemu-img 11.0.0's `vpc` driver reports the
+virtual size as the *file* length, which includes the trailing 512-byte footer;
+converting such an image to raw therefore yields 512 extra bytes ending in the
+`conectix` footer signature, presented as disk contents. This library takes the
+virtual size from the footer's own size field and clamps reads to it, so the
+footer never enters the data stream — which is exactly the defect fixed as P0-3
+in 0.2.0 and guarded by `TestFixedVHD_ReadAtDoesNotLeakFooter`.
+
+Differencing chains remain synthetic-only: qemu-img cannot create them for either
+format ("Backing file not supported"), so `scripts/gen-corpus.ps1` and Hyper-V —
+which need an elevated session — are still the only route to a
+producer-generated chain. Chain correctness rests on the spec-derived fixtures.
 
 ### Notes
 
@@ -179,10 +216,10 @@ release tagging.
 
 ### Notes
 
-- The corpus generator has **not** been executed in this development
-  environment: `New-VHD` requires elevation, which was unavailable. The scripted
-  images and dumps are therefore unverified against real producer output. Running
-  it is the recommended gate before tagging v1.0.0.
+- The Hyper-V corpus generator was **not** executed when this release was
+  written: `New-VHD` requires elevation, which was unavailable. A qemu-based
+  generator needing no elevation was added in 0.6.0 and has since validated the
+  non-differencing paths; see that entry.
 
 ## [0.3.0] - 2026-07-26
 
