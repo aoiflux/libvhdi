@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // readat reads bytes from a VHD or VHDX virtual disk at a given offset and hex-dumps them.
 //
 // Usage:

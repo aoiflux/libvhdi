@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package reader provides high-level APIs for reading VHD/VHDX virtual disk files.
 package reader
 

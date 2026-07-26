@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package diff implements differencing (child) disk resolution over a parent chain.
 package diff
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package bat provides Block Allocation Table (BAT) parsing and lookup logic.
 package bat
 

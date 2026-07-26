@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package types defines all data structures, enums, and constants for the libvhdi library.
 package types
 

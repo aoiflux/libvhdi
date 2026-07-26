@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package block provides block-level reading and sector I/O for virtual disks.
 package block
 

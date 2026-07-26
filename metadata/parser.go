@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package metadata provides VHDX metadata table parsing and value extraction.
 package metadata
 

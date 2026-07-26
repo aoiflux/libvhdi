@@ -41,7 +41,7 @@ import (
 // Version information
 const (
 	// Version is the current library version
-	Version = "0.5.0"
+	Version = "0.6.0"
 
 	// Author information
 	Author = "aoiflux"
@@ -154,6 +154,10 @@ const (
 
 // LogReplayStats describes what a VHDX log replay applied.
 type LogReplayStats = reader.LogReplayStats
+
+// ChainEntry describes one disk in a differencing chain: the set of files that
+// together constitute the device, which is what an evidence record must name.
+type ChainEntry = reader.ChainEntry
 
 // Errors reported when opening or reading a disk.
 var (

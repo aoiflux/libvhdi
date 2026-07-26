@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // open prints metadata and geometry information for a VHD or VHDX virtual disk image.
 //
 // Usage:

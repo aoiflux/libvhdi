@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package binaryutil provides endian-aware binary parsing utilities for the vhdi library.
 package binaryutil
 

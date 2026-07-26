@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // Package reader provides high-level APIs for reading VHD/VHDX virtual disk files.
 package reader
 
@@ -261,6 +263,11 @@ func openVHDX(r io.ReaderAt, fileSize int64, allowDirty bool) (*VirtualDisk, err
 	}
 	if metaOffset == 0 {
 		return nil, errors.New("VHDX metadata region not found")
+	}
+
+	// Check the region pointers before dereferencing either of them.
+	if err := validateVHDXRegions(batOffset, batSize, metaOffset, metaSize, fileSize); err != nil {
+		return nil, err
 	}
 
 	// Parse metadata.

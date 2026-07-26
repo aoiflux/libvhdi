@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package binaryutil_test
 
 import (

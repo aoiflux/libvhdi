@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // VHDX File Information and Image Header Parser
 package reader
 

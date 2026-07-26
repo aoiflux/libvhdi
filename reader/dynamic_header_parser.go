@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // VHD Dynamic Disk Header Parser
 package reader
 

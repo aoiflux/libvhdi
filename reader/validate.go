@@ -92,10 +92,35 @@ func validateVHDDynamic(footer *types.ParsedFileFooter, h *types.ParsedDynamicDi
 	return nil
 }
 
+// validateVHDXRegions checks the region table's pointers before anything
+// dereferences them, so a bad offset is reported as a malformed image rather than
+// surfacing as an I/O error from deep inside a parser.
+func validateVHDXRegions(batOffset, batRegionSize, metaOffset int64, metaRegionSize uint32, fileSize int64) error {
+	type region struct {
+		name   string
+		offset int64
+		size   int64
+	}
+	for _, r := range []region{
+		{"BAT", batOffset, batRegionSize},
+		{"metadata", metaOffset, int64(metaRegionSize)},
+	} {
+		if r.offset <= 0 || r.offset%512 != 0 {
+			return fmt.Errorf("%w: %s region offset %d is not a positive multiple of 512",
+				ErrCorruptImage, r.name, r.offset)
+		}
+		if r.size < 0 {
+			return fmt.Errorf("%w: %s region has negative size %d", ErrCorruptImage, r.name, r.size)
+		}
+		if fileSize > 0 && r.offset+r.size > fileSize {
+			return fmt.Errorf("%w: %s region at %d spans %d bytes, past the end of a %d byte file",
+				ErrCorruptImage, r.name, r.offset, r.size, fileSize)
+		}
+	}
+	return nil
+}
+
 // validateVHDXGeometry checks the metadata that sizes the BAT allocation.
-//
-// batRegionSize is the size the region table declared for the BAT region, and
-// is cross-checked here rather than discarded.
 func validateVHDXGeometry(m *types.MetadataValues, batOffset, batRegionSize, fileSize int64) error {
 	// A zero block size means the required File Parameters metadata item was
 	// absent: parseFileParameters rejects any non-zero value below 1 MiB.

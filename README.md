@@ -319,6 +319,8 @@ func (d *Disk) SetParent(parent *Disk) error
 func (d *Disk) NeedsParent() bool
 func (d *Disk) Parent() *Disk
 func (d *Disk) ChainDepth() int
+func (d *Disk) Chain() []ChainEntry
+func (d *Disk) ChainComplete() bool
 func (d *Disk) ParentResolveError() error
 
 // Offset resolution
@@ -489,7 +491,24 @@ if disk.HasLog() {
 | `IsDirty()`     | carries a log that was **not** replayed; may be stale     |
 
 `ReadAt` on a `Disk` is safe for concurrent use when the underlying
-`io.ReaderAt` is, which holds for `*os.File` and `*bytes.Reader`.
+`io.ReaderAt` is, which holds for `*os.File` and `*bytes.Reader`. This is tested
+rather than merely asserted: `reader/concurrent_test.go` runs many goroutines
+against one `Disk` across the block reader, differencing chains, VHDX partial
+blocks and the log replay overlay, and requires every result to match a
+single-threaded reference. Extent mapping is safe alongside reads too.
+
+Recording provenance for an evidence item means naming every file involved:
+
+```go
+for _, link := range disk.Chain() {
+    fmt.Printf("%d: %s  %s  differencing=%v log=%v
+",
+        link.Index, link.Path, link.GUIDString(), link.IsDifferencing, link.HasLog)
+}
+if !disk.ChainComplete() {
+    log.Printf("chain incomplete: %v", disk.ParentResolveError())
+}
+```
 
 ## Development
 

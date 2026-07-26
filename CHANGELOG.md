@@ -5,6 +5,78 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-26
+
+Closes the outstanding items from the original plan, except the corpus run and
+release tagging.
+
+### Added
+
+- **4096-byte logical sector coverage.** Every VHDX fixture used 512-byte
+  sectors, leaving the 4K path untested. The sector size feeds
+  `chunkRatio = 2^23 × sectorSize / blockSize` and `sectorsPerBlock`, so moving to
+  4096 relocates the chunk-0 sector bitmap entry from BAT index 4096 to 32768 and
+  changes every bit position within the bitmap — genuinely separate arithmetic
+  from the 512-byte path.
+
+  `reader/vhdx4k_test.go` covers geometry, per-sector differencing fallthrough,
+  the last sector of a block (index 255, the likeliest off-by-one), fail-closed
+  behaviour, and extent mapping. The fixture's BAT region grew to 512 KB to hold
+  the 256 KB table a 32 GB 4K-sector disk requires. No defects found.
+
+- **Concurrency tests.** The documented guarantee that `ReadAt` is safe for
+  concurrent use rested on inspection alone, and `go test -race` proved nothing
+  because no test read in parallel. `reader/concurrent_test.go` now runs many
+  goroutines against one `Disk` — across the plain block reader, a two- and
+  three-deep differencing chain, VHDX partial blocks, the log replay overlay, and
+  `Extents` concurrently with `ReadAt` — requiring every result to match a
+  single-threaded reference.
+
+  Verified to have teeth: injecting one unsynchronised counter into the resolver's
+  read path makes the race detector fail the suite immediately.
+
+- **`Chain()` and `ChainComplete()`**, returning a `ChainEntry` per link with its
+  path, identifier, recorded parent identifier, format, disk type, virtual size
+  and log state. This is the set of files that together constitute the device,
+  which is what an evidence record has to name. `ChainComplete` distinguishes a
+  fully resolved chain from one whose parent was never attached.
+
+- **`NOTICE`** documenting the origin of the implementation, the specifications it
+  was written against, the checksum distinction between the two formats, and the
+  external oracles used for cross-validation. This is the substance behind the
+  attribution fix in 0.2.0, which only corrected the `Author` string.
+
+- SPDX identifiers on all Go files (previously 6 of 21 non-test files), and a
+  `.gitattributes` (added in 0.5.0) so `gofmt -l` stops reporting every
+  checked-out file on Windows.
+
+### Fixed
+
+- **VHDX region pointers are validated before they are dereferenced.** The
+  metadata region offset was never checked against the file size, so a bad pointer
+  surfaced as a bare `EOF` from inside the metadata parser rather than as a
+  statement that the image is malformed. Both the BAT and metadata region
+  pointers are now checked up front, before either is read, and report
+  `ErrCorruptImage`.
+
+### Removed
+
+- **`diff.DifferencingDiskReader`.** A dead exported interface that nothing
+  implemented and nothing could implement: its method set
+  (`ReadSector`, `Parent`, `SetParent` over itself) does not correspond to
+  anything in the library, and it could not be wired in without being redesigned.
+  Keeping it only advertised an abstraction that does not exist. Removing an
+  exported type is a breaking change; under semantic versioning for 0.x this is
+  permitted in a minor release, and nothing in this module referenced it.
+
+### Notes
+
+- `Options.AllowMissingParent` was planned in 0.2.0 to let callers opt back into
+  the pre-0.2.0 behaviour of returning zeroes for an unresolved parent. It is
+  deliberately **not** implemented: it would re-enable the silent-corruption mode
+  that release fixed. `ExtentUnresolved` gives a caller the same information
+  without the risk of mistaking padding for data.
+
 ## [0.5.0] - 2026-07-26
 
 ### Added

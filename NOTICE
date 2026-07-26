@@ -1,0 +1,65 @@
+libvhdi
+Copyright (c) 2026 aoiflux
+
+This product is licensed under the MIT License. See the LICENSE file for the
+full text.
+
+
+ORIGIN OF THIS IMPLEMENTATION
+=============================
+
+This is an independent, clean-room implementation of read support for the VHD
+and VHDX virtual disk formats, written in Go against the publicly published
+format specifications listed below.
+
+It contains no code derived from, translated from, or copied out of any other
+VHD/VHDX implementation. In particular it shares no code with libvhdi or libewf,
+the C libraries of similar name and purpose. Releases before 0.2.0 declared
+`Author = "libewf contributors"`; that string was incorrect and has been
+corrected. No code from those projects was ever incorporated.
+
+
+SPECIFICATIONS USED
+===================
+
+VHD
+    "Virtual Hard Disk Image Format Specification", version 1.0, Microsoft
+    Corporation. Published under the Microsoft Open Specification Promise.
+
+    Structures implemented: file footer, dynamic disk header, block allocation
+    table, block sector bitmaps, parent locator entries.
+
+    Note on checksums: this specification defines the footer and dynamic disk
+    header checksum as "a one's complement of the sum of all the bytes ...
+    without the checksum field". It is not a CRC. Applying a CRC to these
+    structures rejects every conformant VHD image.
+
+VHDX
+    "[MS-VHDX]: Virtual Hard Disk v2 (VHDX) File Format", Microsoft Corporation.
+    Published under the Microsoft Open Specification Promise.
+
+    Structures implemented: file identifier, image headers, region table,
+    metadata table and items, block allocation table with interleaved sector
+    bitmap entries, sector bitmap blocks, and the log with its entry headers,
+    data and zero descriptors, and data sectors.
+
+    Note on checksums: VHDX uses CRC-32C (Castagnoli, polynomial 0x82F63B78) for
+    its headers, region tables and log entries. This differs from the VHD
+    checksum above; the two must not be interchanged.
+
+
+CROSS-VALIDATION
+================
+
+Correctness is checked against implementations developed independently of this
+one. `scripts/gen-corpus.ps1` produces authentic images using Microsoft's
+Hyper-V `New-VHD` cmdlet and raw reference dumps using qemu-img, then the corpus
+tests compare this library's decoded output against those dumps byte for byte.
+Neither tool's source is used or redistributed here; they serve only as external
+oracles during testing.
+
+
+THIRD-PARTY CODE
+================
+
+None. This module has no dependencies beyond the Go standard library. See go.mod.

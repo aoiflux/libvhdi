@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package reader
 
 import (
@@ -25,6 +27,11 @@ import (
 
 const (
 	mb = 1024 * 1024
+
+	// The BAT region is sized to hold the largest table the fixtures need. A
+	// 4096-byte logical sector raises the chunk ratio to 32768, so the chunk-0
+	// sector bitmap entry sits at BAT index 32768 and the table runs to 256 KB.
+	vhdxBATRegionSize = 512 * 1024
 
 	vhdxBATRegionOff    = 1 * mb
 	vhdxMetaRegionOff   = 2 * mb
@@ -98,7 +105,7 @@ func buildVHDX(p vhdxParams) []byte {
 
 	// Region table: BAT + metadata, both required.
 	writeRegionTableHeader(img, types.VHDXFirstRegionTableOffset, 2)
-	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+16, types.RegionTypeBAT, vhdxBATRegionOff, 64*1024, true)
+	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+16, types.RegionTypeBAT, vhdxBATRegionOff, vhdxBATRegionSize, true)
 	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+48, types.RegionTypeMetadata, vhdxMetaRegionOff, 64*1024, true)
 	finalizeRegionTableCRC(img, types.VHDXFirstRegionTableOffset)
 
@@ -220,7 +227,7 @@ func writeVHDXBAT(img []byte, batOff int, p vhdxParams) {
 	// implausibly large virtual disk cannot fit its whole table, which is the
 	// point of such a fixture, so entries beyond the region are dropped rather
 	// than written out of bounds.
-	batRegionEnd := batOff + 64*1024
+	batRegionEnd := batOff + vhdxBATRegionSize
 	putEntry := func(index int, state types.BlockState, fileOffsetMB uint64) bool {
 		off := batOff + index*8
 		if off < 0 || off+8 > batRegionEnd || off+8 > len(img) {

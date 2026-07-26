@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 // offsets detects partition tables and filesystems inside a VHD or VHDX virtual disk image.
 // Partition table parsing is provided by github.com/aoiflux/libtable.
 //
