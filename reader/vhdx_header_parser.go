@@ -5,11 +5,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
 )
+
+// maxRegionTableEntries is the region table entry limit from the VHDX
+// specification. The 64 KB region could not hold more in any case.
+const maxRegionTableEntries = 2047
 
 // VHDXFileInfoParser provides functionality to parse VHDX file information.
 type VHDXFileInfoParser struct {
@@ -246,8 +251,17 @@ func (p *VHDXRegionTableParser) ReadRegionTableAt(offset int64) ([]types.ParsedR
 	// Parse header fields (little-endian).
 	numEntries := uint32(buf[8]) | uint32(buf[9])<<8 | uint32(buf[10])<<16 | uint32(buf[11])<<24
 
+	// The specification caps the table at 2047 entries, which is also all that
+	// fits in the 64 KB region. Checking up front avoids relying on the
+	// per-entry bounds test, whose uint32 offset arithmetic would wrap for very
+	// large counts.
+	if numEntries > maxRegionTableEntries {
+		return nil, fmt.Errorf("VHDX region table declares %d entries, more than the %d allowed",
+			numEntries, maxRegionTableEntries)
+	}
+
 	// Parse entries (32 bytes each, starting at offset 16).
-	var entries []types.ParsedRegionTableEntry
+	entries := make([]types.ParsedRegionTableEntry, 0, numEntries)
 	for i := uint32(0); i < numEntries; i++ {
 		base := 16 + i*32
 		if int(base)+32 > len(buf) {

@@ -42,6 +42,10 @@ func (br *VHDBlockReader) ReadAt(p []byte, virtualOffset int64) (int, error) {
 		if err != nil {
 			return total, err
 		}
+		if n == 0 {
+			// No progress and no error would spin forever.
+			return total, io.ErrUnexpectedEOF
+		}
 	}
 	return total, nil
 }
@@ -49,6 +53,11 @@ func (br *VHDBlockReader) ReadAt(p []byte, virtualOffset int64) (int, error) {
 // readSegment reads as many bytes as possible starting at virtualOffset, bounded
 // by the end of the block that contains virtualOffset.
 func (br *VHDBlockReader) readSegment(dst []byte, virtualOffset int64) (int, error) {
+	// A zero block size would divide by zero below. It can only arrive from a
+	// malformed BAT, so report it rather than crashing the caller.
+	if br.blockSize == 0 {
+		return 0, errors.New("libvhdi: VHD block size is zero")
+	}
 	blockIndex := uint32(virtualOffset / int64(br.blockSize))
 	offsetInBlock := virtualOffset % int64(br.blockSize)
 
@@ -156,11 +165,21 @@ func (br *VHDXBlockReader) ReadAt(p []byte, virtualOffset int64) (int, error) {
 		if err != nil {
 			return total, err
 		}
+		if n == 0 {
+			// No progress and no error would spin forever.
+			return total, io.ErrUnexpectedEOF
+		}
 	}
 	return total, nil
 }
 
 func (br *VHDXBlockReader) readSegment(dst []byte, virtualOffset int64) (int, error) {
+	if br.blockSize == 0 {
+		return 0, errors.New("libvhdi: VHDX block size is zero")
+	}
+	if br.sectorSize == 0 {
+		return 0, errors.New("libvhdi: VHDX sector size is zero")
+	}
 	blockIndex := uint32(virtualOffset / int64(br.blockSize))
 	offsetInBlock := virtualOffset % int64(br.blockSize)
 
@@ -199,6 +218,9 @@ func (br *VHDXBlockReader) readSegment(dst []byte, virtualOffset int64) (int, er
 // blockFileOffset is the physical file offset of the start of the block data.
 func (br *VHDXBlockReader) readPartialBlock(dst []byte, blockFileOffset int64, blockIndex uint32, offsetInBlock int64) (int, error) {
 	chunkRatio := uint64(br.bat.ChunkRatio)
+	if chunkRatio == 0 {
+		return 0, errors.New("libvhdi: VHDX chunk ratio is zero")
+	}
 	chunkIndex := uint64(blockIndex) / chunkRatio
 	blockInChunk := uint64(blockIndex) % chunkRatio
 	sectorsPerBlock := uint64(br.blockSize) / uint64(br.sectorSize)

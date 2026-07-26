@@ -178,19 +178,101 @@ func (p *VHDDynamicDiskHeaderParser) parseParentLocators(data []byte) ([]types.P
 
 		platformDataOffset := (uint64(platformDataOffsetHigh) << 32) | uint64(platformDataOffsetLow)
 
-		entries = append(entries, types.ParentLocatorEntry{
+		entry := types.ParentLocatorEntry{
 			PlatformCode:       platformCode,
 			PlatformDataSpace:  platformDataSpace,
 			PlatformDataLength: platformDataLength,
 			Reserved:           reserved,
 			PlatformDataOffset: platformDataOffset,
-		})
+			Key:                platformCodeString(platformCode),
+		}
+
+		// The locator's platform data holds the actual path to the parent. It
+		// lives elsewhere in the file, at platformDataOffset.
+		if value, err := p.readLocatorPath(entry); err == nil {
+			entry.Value = value
+		}
+
+		entries = append(entries, entry)
 	}
 
 	return entries, nil
 }
 
-// VerifyHeaderChecksum verifies the header's CRC-32 checksum.
+// Parent locator platform codes. The W2*u codes store UTF-16 little-endian
+// Windows paths; the deprecated Wi2* codes store the same paths as locators
+// into a Windows registry-style structure and are not usable directly.
+const (
+	platformCodeNone = 0x00000000
+	platformCodeWi2r = 0x57693272 // "Wi2r", deprecated
+	platformCodeWi2k = 0x5769326B // "Wi2k", deprecated
+	platformCodeW2ru = 0x57327275 // "W2ru", relative path
+	platformCodeW2ku = 0x5732316B // "W2ku", absolute path
+	platformCodeMac  = 0x4D616320 // "Mac "
+	platformCodeMacX = 0x4D616358 // "MacX"
+)
+
+// maxLocatorPathBytes bounds how much locator platform data is read. Windows
+// paths are at most 32767 UTF-16 code units; anything larger is malformed and
+// must not drive an allocation.
+const maxLocatorPathBytes = 64 * 1024
+
+func platformCodeString(code uint32) string {
+	if code == platformCodeNone {
+		return ""
+	}
+	return string([]byte{byte(code >> 24), byte(code >> 16), byte(code >> 8), byte(code)})
+}
+
+// readLocatorPath reads and decodes a parent locator's platform data.
+func (p *VHDDynamicDiskHeaderParser) readLocatorPath(entry types.ParentLocatorEntry) (string, error) {
+	switch entry.PlatformCode {
+	case platformCodeW2ru, platformCodeW2ku:
+		// UTF-16LE Windows path.
+	default:
+		return "", errors.New("locator platform code does not carry a usable path")
+	}
+
+	if entry.PlatformDataLength == 0 || entry.PlatformDataLength > maxLocatorPathBytes {
+		return "", errors.New("locator platform data length out of range")
+	}
+	if entry.PlatformDataOffset > uint64(1<<62) {
+		return "", errors.New("locator platform data offset out of range")
+	}
+
+	buf := make([]byte, entry.PlatformDataLength)
+	if _, err := p.reader.ReadAt(buf, int64(entry.PlatformDataOffset)); err != nil {
+		return "", err
+	}
+
+	return decodeUTF16LE(buf), nil
+}
+
+// decodeUTF16LE decodes a UTF-16 little-endian byte slice, stopping at the
+// first null unit.
+func decodeUTF16LE(data []byte) string {
+	if len(data) < 2 {
+		return ""
+	}
+	units := make([]uint16, 0, len(data)/2)
+	for i := 0; i+1 < len(data); i += 2 {
+		v := binary.LittleEndian.Uint16(data[i : i+2])
+		if v == 0 {
+			break
+		}
+		units = append(units, v)
+	}
+	if len(units) == 0 {
+		return ""
+	}
+	return string(utf16.Decode(units))
+}
+
+// VerifyHeaderChecksum verifies the dynamic disk header's checksum.
+//
+// Per the VHD specification this is a one's complement of the sum of all header
+// bytes with the checksum field zeroed — not a CRC. CRC-32C applies only to
+// VHDX structures.
 func (p *VHDDynamicDiskHeaderParser) VerifyHeaderChecksum(header *types.DynamicDiskHeader) bool {
 	// Checksum is calculated with the checksum field itself set to zero
 	headerCopy := *header
@@ -199,10 +281,7 @@ func (p *VHDDynamicDiskHeaderParser) VerifyHeaderChecksum(header *types.DynamicD
 	// Serialize header to bytes
 	buf := headerToBytes(&headerCopy)
 
-	// Compute CRC-32
-	computed := binaryutil.CRC32(buf)
-
-	return computed == header.Checksum
+	return binaryutil.VHDChecksum(buf) == header.Checksum
 }
 
 // headerToBytes serializes a DynamicDiskHeader to bytes.

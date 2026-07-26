@@ -178,7 +178,11 @@ func (p *VHDFooterParser) ReadFooterAt(offset int64) (*types.ParsedFileFooter, e
 	return parsed, nil
 }
 
-// VerifyFooterChecksum verifies the footer's CRC-32 checksum.
+// VerifyFooterChecksum verifies the footer's checksum.
+//
+// Per the VHD specification this is a one's complement of the sum of all footer
+// bytes with the checksum field zeroed — not a CRC. CRC-32C applies only to
+// VHDX structures.
 func (p *VHDFooterParser) VerifyFooterChecksum(footer *types.FileFooter) bool {
 	// Checksum is calculated with the checksum field itself set to zero
 	// Create a copy with checksum zeroed out
@@ -188,10 +192,7 @@ func (p *VHDFooterParser) VerifyFooterChecksum(footer *types.FileFooter) bool {
 	// Serialize footer to bytes
 	buf := footerToBytes(&footerCopy)
 
-	// Compute CRC-32
-	computed := binaryutil.CRC32(buf)
-
-	return computed == footer.Checksum
+	return binaryutil.VHDChecksum(buf) == footer.Checksum
 }
 
 // footerToBytes serializes a FileFooter to bytes.

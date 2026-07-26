@@ -254,8 +254,34 @@ func (r *ReadAtReader) ReadInt16LittleEndian() (int16, error) {
 
 // CRC32 computes a CRC-32C (Castagnoli) checksum matching the VHDX polynomial
 // 0x82f63b78. Uses hardware acceleration where available.
+//
+// This is a VHDX construct. VHD footers and dynamic disk headers use an
+// entirely different algorithm — see VHDChecksum.
 func CRC32(data []byte) uint32 {
 	return crc32.Checksum(data, castagnoliTable)
+}
+
+// VHDChecksum computes the checksum used by VHD file footers and dynamic disk
+// headers, as defined by the VHD Image Format Specification: "a one's
+// complement of the sum of all the bytes in the footer without the checksum
+// field".
+//
+// The caller must zero the structure's checksum field before calling.
+//
+// This is deliberately not a CRC. Applying CRC32 (CRC-32C) to VHD structures
+// rejects every conformant VHD image.
+func VHDChecksum(data []byte) uint32 {
+	var sum uint32
+	for _, b := range data {
+		sum += uint32(b)
+	}
+	return ^sum
+}
+
+// VerifyVHDChecksum verifies a VHD structure whose checksum field has already
+// been zeroed against its stored checksum value.
+func VerifyVHDChecksum(data []byte, storedChecksum uint32) bool {
+	return VHDChecksum(data) == storedChecksum
 }
 
 // CRC32WithInitial computes a CRC-32C checksum starting from an existing CRC state.

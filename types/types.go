@@ -378,6 +378,12 @@ type MetadataValues struct {
 	VirtualDiskIdentifier [16]byte
 	VirtualDiskSize       uint64
 	LeaveBitsUnallocated  bool
+
+	// ParentLocators holds every key/value pair from the parent locator
+	// metadata item. A VHDX child commonly records several candidate paths
+	// (relative, absolute and volume-relative), and any of them may be the one
+	// that still resolves.
+	ParentLocators []ParentLocatorEntry
 }
 
 // ============================================================================

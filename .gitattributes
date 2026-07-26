@@ -1,0 +1,26 @@
+# Normalise line endings in the repository to LF.
+#
+# The Go toolchain and gofmt both assume LF, and without this `gofmt -l` reports
+# every checked-out file on Windows as unformatted, which drowns out real
+# findings.
+#
+# Applying this re-normalises existing files on the next checkout, so expect one
+# whitespace-only commit. Run `git add --renormalize .` to do it deliberately in
+# a single commit rather than piecemeal.
+
+* text=auto
+
+*.go    text eol=lf
+*.md    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# PowerShell is happiest with CRLF on Windows.
+*.ps1   text eol=crlf
+
+# Virtual disk images and raw dumps must never be transformed.
+*.vhd   binary
+*.vhdx  binary
+*.raw   binary

@@ -5,11 +5,27 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"unicode/utf16"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
+)
+
+// Metadata table layout constants. Every count and offset read from the table is
+// bounded against these and the region size, since all of them come from the
+// image and would otherwise drive unbounded reads and allocations.
+const (
+	metadataTableHeaderSize = 32
+	metadataTableEntrySize  = 32
+
+	// parentLocatorHeaderSize is the 16-byte type GUID plus 2 reserved bytes
+	// plus the 2-byte entry count.
+	parentLocatorHeaderSize = 20
+
+	// parentLocatorEntrySize is two 4-byte offsets and two 2-byte lengths.
+	parentLocatorEntrySize = 12
 )
 
 // Parser parses the VHDX metadata region and extracts structured values.
@@ -55,6 +71,17 @@ func (p *Parser) readTable() ([]types.ParsedMetadataTableEntry, error) {
 	numEntries, err := br.ReadUint16LittleEndian()
 	if err != nil {
 		return nil, err
+	}
+
+	// The table header is 32 bytes and each entry is 32 bytes, so the region
+	// physically bounds how many entries can exist. Without this check a
+	// crafted count drives reads and allocations far beyond the region.
+	if p.regionSize > 0 {
+		maxEntries := (p.regionSize - metadataTableHeaderSize) / metadataTableEntrySize
+		if uint32(numEntries) > maxEntries {
+			return nil, fmt.Errorf("VHDX metadata table declares %d entries but the %d byte region holds at most %d",
+				numEntries, p.regionSize, maxEntries)
+		}
 	}
 
 	// Reserved (20 bytes)
@@ -268,6 +295,19 @@ func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.Metad
 		return err
 	}
 
+	// The item's declared size bounds how many descriptors can exist. Without
+	// this, a crafted count of 65535 with maximal key and value lengths drives
+	// gigabytes of reads and allocations from a few bytes of input.
+	if size < parentLocatorHeaderSize {
+		return fmt.Errorf("VHDX parent locator item is %d bytes, shorter than its %d byte header",
+			size, parentLocatorHeaderSize)
+	}
+	maxEntries := (size - parentLocatorHeaderSize) / parentLocatorEntrySize
+	if uint32(entryCount) > maxEntries {
+		return fmt.Errorf("VHDX parent locator declares %d entries but its %d byte item holds at most %d",
+			entryCount, size, maxEntries)
+	}
+
 	type locatorEntry struct {
 		keyOffset   uint32
 		valueOffset uint32
@@ -297,9 +337,19 @@ func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.Metad
 		locEntries[i] = locatorEntry{ko, vo, kl, vl}
 	}
 
-	// Read key/value pairs. Offsets are relative to the start of this item.
+	// Read key/value pairs. Offsets are relative to the start of this item, so
+	// every span must lie inside it.
 	base := offset
+	within := func(off uint32, length uint16) bool {
+		end := uint64(off) + uint64(length)
+		return end <= uint64(size)
+	}
+
 	for _, le := range locEntries {
+		if !within(le.keyOffset, le.keyLength) || !within(le.valueOffset, le.valueLength) {
+			return fmt.Errorf("VHDX parent locator entry spans outside its %d byte item", size)
+		}
+
 		keyBytes := make([]byte, le.keyLength)
 		if _, err := p.reader.ReadAt(keyBytes, base+int64(le.keyOffset)); err != nil {
 			return err
@@ -319,6 +369,12 @@ func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.Metad
 			if vals.ParentFilename == "" {
 				vals.ParentFilename = value
 			}
+			// Retain every candidate, in the order the image lists them, so a
+			// resolver can fall back when the first path no longer exists.
+			vals.ParentLocators = append(vals.ParentLocators, types.ParentLocatorEntry{
+				Key:   key,
+				Value: value,
+			})
 		}
 	}
 

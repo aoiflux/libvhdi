@@ -246,7 +246,15 @@ func BlockCountVHDX(bat *types.VHDXBlockAllocationTable) uint32 {
 // SECTOR BITMAP UTILITIES
 // ============================================================================
 
-// SectorBitmap provides methods to work with VHD sector bitmaps.
+// SectorBitmap provides methods to work with VHD block bitmaps.
+//
+// A VHD block bitmap holds one bit per 512-byte sector of the block, stored
+// most-significant-bit first: the first sector of the block is bit 7 of byte 0.
+// This is the ordering used by the VHD specification, the reference libvhdi C
+// implementation and qemu's vpc driver.
+//
+// VHDX sector bitmaps use the opposite (least-significant-bit first) ordering
+// and are handled separately; do not use this type for them.
 type SectorBitmap struct {
 	data []byte
 }
@@ -268,6 +276,8 @@ func ReadSectorBitmap(reader io.ReaderAt, offset int64, bitmapSize uint32) (*Sec
 }
 
 // IsSectorAllocated checks if a sector (within a block) is allocated.
+//
+// Bits are read most-significant-bit first, per the VHD specification.
 func (sb *SectorBitmap) IsSectorAllocated(sectorIndex uint32) bool {
 	byteIndex := sectorIndex / 8
 	bitIndex := sectorIndex % 8
@@ -277,7 +287,7 @@ func (sb *SectorBitmap) IsSectorAllocated(sectorIndex uint32) bool {
 	}
 
 	byte_ := sb.data[byteIndex]
-	return (byte_ & (1 << bitIndex)) != 0
+	return (byte_ & (1 << (7 - bitIndex))) != 0
 }
 
 // GetAllocatedSectorRanges returns a list of contiguous allocated sector ranges.
