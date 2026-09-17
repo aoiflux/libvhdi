@@ -4,6 +4,7 @@ package reader
 
 import (
 	"encoding/binary"
+	"unicode/utf16"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
@@ -60,6 +61,15 @@ type vhdxParams struct {
 	virtualDiskSize uint64
 	hasParent       bool
 
+	// creator is the file identifier's Creator field, naming the producing
+	// tool. It is written as UTF-16 little-endian, which is what the format
+	// specifies and what the parser has to cope with.
+	creator string
+
+	// physicalSectorSize overrides the Physical Sector Size metadata item.
+	// Zero omits the item, which makes the parser fall back to its default.
+	physicalSectorSize uint32
+
 	// blockState is the BAT state for payload block 0 (6 = fully present,
 	// 7 = partially present, 0 = not present).
 	blockState types.BlockState
@@ -88,20 +98,51 @@ type vhdxParams struct {
 	// start of the log region. A log GUID is written into both headers, so the
 	// image is dirty until the entry is replayed.
 	logWrites []logWrite
+
+	// dataWriteGUID is written into both headers as the DataWriteGuid. This is
+	// the identity a differencing child names in its parent_linkage locator, so
+	// a parent fixture and its child's linkage must agree for the chain to
+	// verify. The zero value leaves the field zero.
+	dataWriteGUID [16]byte
+
+	// parentLinkage, when non-empty, is written as the parent_linkage locator
+	// value in registry form. Empty omits the entry entirely, modelling an
+	// image that records no parent identity.
+	parentLinkage string
+
+	// virtualDiskID is the Virtual Disk Identifier metadata item. Real images
+	// give every disk its own, so a chain fixture must too: sharing one makes
+	// distinct disks indistinguishable to anything keyed on identity. The zero
+	// value keeps the historical constant.
+	virtualDiskID [16]byte
+}
+
+// putUTF16LE encodes s as NUL-terminated UTF-16 little-endian into dst, which
+// is how VHDX stores every string it holds.
+func putUTF16LE(dst []byte, s string) {
+	i := 0
+	for _, u := range utf16.Encode([]rune(s)) {
+		if i+2 > len(dst) {
+			return
+		}
+		binary.LittleEndian.PutUint16(dst[i:i+2], u)
+		i += 2
+	}
 }
 
 // buildVHDX assembles a VHDX image per vhdxParams.
 func buildVHDX(p vhdxParams) []byte {
 	img := make([]byte, vhdxImageSize)
 
-	// File identifier.
+	// File identifier: signature, then a 512-byte UTF-16 little-endian Creator.
 	copy(img[0:8], []byte(types.VHDXFileSignature))
+	putUTF16LE(img[8:520], p.creator)
 
 	// Both headers, sequence numbers 1 and 2. A zero log GUID marks the file
 	// clean, needing no log replay.
 	withLog := p.dirtyLog || len(p.logWrites) > 0
-	writeVHDXImageHeaderWith(img, types.VHDXFirstHeaderOffset, 1, withLog)
-	writeVHDXImageHeaderWith(img, types.VHDXSecondHeaderOffset, 2, withLog)
+	writeVHDXImageHeaderWith(img, types.VHDXFirstHeaderOffset, 1, withLog, p.dataWriteGUID)
+	writeVHDXImageHeaderWith(img, types.VHDXSecondHeaderOffset, 2, withLog, p.dataWriteGUID)
 
 	// Region table: BAT + metadata, both required.
 	writeRegionTableHeader(img, types.VHDXFirstRegionTableOffset, 2)
@@ -190,17 +231,13 @@ func alignUpInt(n, to int) int {
 	return (n/to + 1) * to
 }
 
-// writeVHDXImageHeader writes a clean 4096-byte VHDX header and its CRC-32C.
-func writeVHDXImageHeader(img []byte, off int, seq uint64) {
-	writeVHDXImageHeaderWith(img, off, seq, false)
-}
-
 // writeVHDXImageHeaderWith writes a 4096-byte VHDX header and its CRC-32C,
 // optionally marking the image dirty via a non-zero log GUID.
-func writeVHDXImageHeaderWith(img []byte, off int, seq uint64, withLog bool) {
+func writeVHDXImageHeaderWith(img []byte, off int, seq uint64, withLog bool, dataWriteGUID [16]byte) {
 	copy(img[off:off+4], []byte(types.VHDXHeaderSignature))
 	binary.LittleEndian.PutUint64(img[off+8:off+16], seq)
 	// FileWriteGuid at +16, DataWriteGuid at +32, LogGuid at +48.
+	copy(img[off+32:off+48], dataWriteGUID[:])
 	binary.LittleEndian.PutUint16(img[off+64:off+66], 0)      // log format version
 	binary.LittleEndian.PutUint16(img[off+66:off+68], 0x0001) // format version
 	if withLog {
@@ -267,6 +304,7 @@ func writeVHDXMetadataRegion(img []byte, metaOff int, p vhdxParams) {
 		offFileParams = 0x1000
 		offDiskSize   = 0x1010
 		offSectorSize = 0x1020
+		offPhysSector = 0x1028
 		offDiskID     = 0x1030
 		offParentLoc  = 0x1100
 	)
@@ -288,6 +326,9 @@ func writeVHDXMetadataRegion(img []byte, metaOff int, p vhdxParams) {
 		emit(types.MetadataItemVirtualDiskSize, offDiskSize, 8)
 	}
 	emit(types.MetadataItemLogicalSectorSize, offSectorSize, 4)
+	if p.physicalSectorSize != 0 {
+		emit(types.MetadataItemPhysicalSectorSize, offPhysSector, 4)
+	}
 	emit(types.MetadataItemVirtualDiskIdentifier, offDiskID, 16)
 	if p.hasParent {
 		emit(types.MetadataItemParentLocator, offParentLoc, 256)
@@ -306,35 +347,56 @@ func writeVHDXMetadataRegion(img []byte, metaOff int, p vhdxParams) {
 
 	binary.LittleEndian.PutUint64(img[metaOff+offDiskSize:], p.virtualDiskSize)
 	binary.LittleEndian.PutUint32(img[metaOff+offSectorSize:], p.sectorSize)
-	copy(img[metaOff+offDiskID:metaOff+offDiskID+16], repeatByte(0x5A, 16))
+	if p.physicalSectorSize != 0 {
+		binary.LittleEndian.PutUint32(img[metaOff+offPhysSector:], p.physicalSectorSize)
+	}
+	diskID := p.virtualDiskID
+	if diskID == ([16]byte{}) {
+		copy(diskID[:], repeatByte(0x5A, 16))
+	}
+	copy(img[metaOff+offDiskID:metaOff+offDiskID+16], diskID[:])
 
 	if p.hasParent {
-		writeVHDXParentLocator(img, metaOff+offParentLoc, "relative_path", "parent.vhdx")
+		pairs := [][2]string{{"relative_path", "parent.vhdx"}}
+		if p.parentLinkage != "" {
+			pairs = append(pairs, [2]string{"parent_linkage", p.parentLinkage})
+		}
+		writeVHDXParentLocator(img, metaOff+offParentLoc, pairs...)
 	}
 }
 
-// writeVHDXParentLocator writes a parent locator item with a single key/value
-// pair. Offsets within the item are relative to the item's start.
-func writeVHDXParentLocator(img []byte, itemOff int, key, value string) {
+// writeVHDXParentLocator writes a parent locator item holding the given
+// key/value pairs. Offsets within the item are relative to the item's start.
+//
+// The locator type GUID is mandatory: the specification defines exactly one, and
+// the keys below are only meaningful under it. Leaving it zero, as this builder
+// once did, produces an image no conformant reader should accept.
+func writeVHDXParentLocator(img []byte, itemOff int, pairs ...[2]string) {
 	// 16-byte locator type GUID, 2 reserved, 2 entry count.
-	binary.LittleEndian.PutUint16(img[itemOff+18:itemOff+20], 1)
+	copy(img[itemOff:itemOff+16], types.ParentLocatorTypeVHDX[:])
+	binary.LittleEndian.PutUint16(img[itemOff+18:itemOff+20], uint16(len(pairs)))
 
-	const (
-		descOff = 20 // first (and only) 12-byte descriptor
-		keyOff  = 64
-		valOff  = 128
-	)
+	// Descriptors follow the 20-byte header; string data follows the
+	// descriptors, packed in order from a fixed offset that clears them.
+	const descOff = 20
+	dataOff := 64
 
-	keyBytes := utf16LEBytes(key)
-	valBytes := utf16LEBytes(value)
+	for i, kv := range pairs {
+		keyBytes := utf16LEBytes(kv[0])
+		valBytes := utf16LEBytes(kv[1])
 
-	binary.LittleEndian.PutUint32(img[itemOff+descOff:], keyOff)
-	binary.LittleEndian.PutUint32(img[itemOff+descOff+4:], valOff)
-	binary.LittleEndian.PutUint16(img[itemOff+descOff+8:], uint16(len(keyBytes)))
-	binary.LittleEndian.PutUint16(img[itemOff+descOff+10:], uint16(len(valBytes)))
+		d := itemOff + descOff + i*12
+		binary.LittleEndian.PutUint32(img[d:], uint32(dataOff))
+		copy(img[itemOff+dataOff:], keyBytes)
+		dataOff += len(keyBytes)
 
-	copy(img[itemOff+keyOff:], keyBytes)
-	copy(img[itemOff+valOff:], valBytes)
+		binary.LittleEndian.PutUint32(img[d+4:], uint32(dataOff))
+		copy(img[itemOff+dataOff:], valBytes)
+		dataOff += len(valBytes)
+
+		binary.LittleEndian.PutUint16(img[d+8:], uint16(len(keyBytes)))
+		binary.LittleEndian.PutUint16(img[d+10:], uint16(len(valBytes)))
+	}
 }
 
 func utf16LEBytes(s string) []byte {

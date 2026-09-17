@@ -9,6 +9,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
@@ -29,8 +32,12 @@ const DefaultMaxChainDepth = 32
 // relaxes a check is named so that false — the zero value — is the strict
 // setting.
 type Options struct {
-	// ParentResolver locates parents for differencing disks. When nil, no
-	// automatic resolution is attempted and the caller must use SetParent.
+	// ParentResolver locates parents for differencing disks.
+	//
+	// Nil means the default: a resolver that searches the image's own
+	// directory, which is where a differencing chain's parents conventionally
+	// live. Set it to NoParentResolution to suppress resolution entirely and
+	// attach parents by hand with SetParent.
 	ParentResolver ParentResolver
 
 	// Size is the total size of the image in bytes. When zero, Open derives it
@@ -54,17 +61,33 @@ type Options struct {
 	// with ErrParentRequired.
 	RequireParentChain bool
 
-	// AllowDirtyImage opens a VHDX image whose log has not been replayed. Such
-	// an image's block allocation table and metadata may be stale, so its
-	// contents may not reflect the last committed state. Log replay is not
-	// implemented, so this trades a hard failure for a documented risk; check
-	// IsDirty on the result. Leaving this false refuses the image with
+	// AllowDirtyImage opens a VHDX image whose log could not be replayed.
+	//
+	// Log replay is implemented and is attempted automatically: a replayable log
+	// is applied into a read-only in-memory overlay, leaving the file itself
+	// byte-identical, and such an image is not dirty. This option covers the
+	// remaining case, where the log is present but unreplayable -- a torn write,
+	// a truncated buffer, a broken sequence. Then the block allocation table and
+	// metadata may be stale and the contents may not reflect the last committed
+	// state.
+	//
+	// Setting it trades a hard failure for a documented risk. The result reports
+	// IsDirty, and LogReplayed distinguishes an image that needed no replay from
+	// one whose replay was skipped. Leaving it false refuses the image with
 	// ErrDirtyImage.
 	AllowDirtyImage bool
 }
 
 func (o *Options) allowDirty() bool {
 	return o != nil && o.AllowDirtyImage
+}
+
+// requireParentChain reports whether an unresolvable chain must fail the open.
+//
+// Every Options accessor has to tolerate a nil receiver: nil is a documented
+// argument to Open and OpenFileWith, and resolveChain reaches these from both.
+func (o *Options) requireParentChain() bool {
+	return o != nil && o.RequireParentChain
 }
 
 func (o *Options) maxChainDepth() int {
@@ -74,8 +97,30 @@ func (o *Options) maxChainDepth() int {
 	return o.MaxChainDepth
 }
 
+// NoParentResolution suppresses automatic parent chain resolution.
+//
+// It exists so that nil can mean "the default" in Options.ParentResolver
+// without leaving a caller who genuinely wants no resolution unable to say so.
+// Before v0.3.0 nil meant no resolution in Open but the default in OpenFile,
+// which is the sort of difference that is discovered by a differencing disk
+// quietly failing to resolve rather than by reading the documentation.
+//
+// A disk opened this way reports NeedsParent, and reads that resolve to the
+// missing parent fail with ErrParentRequired rather than returning zeroes.
+var NoParentResolution ParentResolver = noParentResolution{}
+
+type noParentResolution struct{}
+
+func (noParentResolution) ResolveParent(ParentRequest) (ParentSource, error) {
+	return ParentSource{}, ErrParentNotFound
+}
+
+// resolver returns the resolver to use, applying the nil-means-default rule.
 func (o *Options) resolver() ParentResolver {
-	if o == nil {
+	if o == nil || o.ParentResolver == nil {
+		return DirParentResolver()
+	}
+	if _, suppressed := o.ParentResolver.(noParentResolution); suppressed {
 		return nil
 	}
 	return o.ParentResolver
@@ -154,9 +199,16 @@ func detectFormat(r io.ReaderAt) (types.FileFormat, error) {
 // *os.File, *bytes.Reader, *strings.Reader, io.SectionReader and fs.File. A
 // bare io.ReaderAt with none of those must supply opts.Size for VHD images.
 //
-// When opts.ParentResolver is set, differencing parent chains are resolved
-// automatically so the returned disk presents a correct contiguous device with
-// no manual SetParent wiring.
+// Differencing parent chains are resolved automatically, exactly as OpenFile
+// does. When r names a file -- an *os.File does -- its directory is searched,
+// since that is where a chain's parents conventionally live. Set
+// opts.ParentResolver to change where the search looks, or to
+// NoParentResolution to suppress it and attach parents by hand.
+//
+// Resolution is best-effort unless opts.requireParentChain() is set: a chain that
+// cannot be completed still opens, with NeedsParent reporting true and reads
+// that need the parent failing with ErrParentRequired rather than returning
+// zeroes.
 //
 // opts may be nil, which selects the documented defaults.
 func Open(r io.ReaderAt, opts *Options) (*VirtualDisk, error) {
@@ -195,11 +247,33 @@ func Open(r io.ReaderAt, opts *Options) (*VirtualDisk, error) {
 		return nil, err
 	}
 
+	// A reader that names a file gives the chain search somewhere to look, and
+	// is what makes Open(f, nil) behave the same as OpenFile(f.Name()).
+	d.path = readerPath(r)
+
 	if err := d.resolveChain(opts); err != nil {
 		d.Close()
 		return nil, err
 	}
 	return d, nil
+}
+
+// namer matches readers that know their own path, which *os.File does.
+type namer interface {
+	Name() string
+}
+
+// readerPath reports the file r was opened from, or "" when r cannot say.
+//
+// A path is not required for reading -- every structure is located by offset --
+// but without one a differencing disk has no directory to search for its
+// parents, and cycle detection loses its most faithful key.
+func readerPath(r io.ReaderAt) string {
+	n, ok := r.(namer)
+	if !ok {
+		return ""
+	}
+	return n.Name()
 }
 
 // OpenFileWith opens a VHD or VHDX file by path with explicit options.
@@ -233,23 +307,20 @@ func OpenFileWith(name string, opts *Options) (*VirtualDisk, error) {
 	}
 	if err != nil {
 		f.Close()
+		// A file named like a segment of a split disk is not a VHD this library
+		// is failing to read: neither specification defines a multi-file layout,
+		// so it is a different format entirely. Saying that is more useful than
+		// reporting an invalid signature and leaving the caller to work out why
+		// their "disk" will not open.
+		if looksLikeSplitSegment(name) {
+			return nil, fmt.Errorf("%w: %q", ErrSplitImage, filepath.Base(name))
+		}
 		return nil, err
 	}
 	d.closer = f
 	d.path = name
 
-	effective := opts
-	if effective == nil {
-		effective = &Options{}
-	}
-	if effective.ParentResolver == nil {
-		// Copy so a caller's Options value is not mutated.
-		clone := *effective
-		clone.ParentResolver = DirParentResolver()
-		effective = &clone
-	}
-
-	if err := d.resolveChain(effective); err != nil {
+	if err := d.resolveChain(opts); err != nil {
 		d.Close()
 		return nil, err
 	}
@@ -275,9 +346,12 @@ func (d *VirtualDisk) resolveChain(opts *Options) error {
 
 	maxDepth := opts.maxChainDepth()
 
-	// Track identifiers already in the chain so a self-referential or looping
-	// set of images cannot be walked forever.
-	seen := map[[16]byte]bool{d.Identifier(): true}
+	// Track disks already in the chain so a self-referential or looping set of
+	// images cannot be walked forever.
+	seen := map[string]bool{}
+	if k := chainKey(d); k != "" {
+		seen[k] = true
+	}
 
 	current := d
 	for depth := 0; current.IsDifferencing(); depth++ {
@@ -299,7 +373,7 @@ func (d *VirtualDisk) resolveChain(opts *Options) error {
 
 		src, err := resolver.ResolveParent(req)
 		if err != nil {
-			if opts.RequireParentChain {
+			if opts.requireParentChain() {
 				return err
 			}
 			// Leave the chain incomplete; reads needing the parent fail closed.
@@ -308,17 +382,17 @@ func (d *VirtualDisk) resolveChain(opts *Options) error {
 		}
 		if src.ReaderAt == nil {
 			err := fmt.Errorf("libvhdi: resolver returned a nil reader for %q", req.ParentFilename)
-			if opts.RequireParentChain {
+			if opts.requireParentChain() {
 				return err
 			}
 			d.parentErr = err
 			return nil
 		}
 
-		parent, err := openParent(src, current.Format(), opts.allowDirty())
+		parent, err := openParent(src, opts.allowDirty())
 		if err != nil {
 			closeSource(src)
-			if opts.RequireParentChain {
+			if opts.requireParentChain() {
 				return fmt.Errorf("opening parent %q: %w", src.Name, err)
 			}
 			d.parentErr = fmt.Errorf("opening parent %q: %w", src.Name, err)
@@ -328,29 +402,30 @@ func (d *VirtualDisk) resolveChain(opts *Options) error {
 		parent.path = src.Name
 		parent.ownedByChild = true
 
-		if err := verifyParent(current, parent, opts); err != nil {
+		if err := verifyParent(current, parent, src, opts); err != nil {
 			parent.Close()
-			if opts.RequireParentChain {
+			if opts.requireParentChain() {
 				return err
 			}
 			d.parentErr = err
 			return nil
 		}
 
-		if seen[parent.Identifier()] {
+		if key := chainKey(parent); key != "" && seen[key] {
 			parent.Close()
-			err := fmt.Errorf("%w: %s", ErrChainCycle, parent.GUIDString())
-			if opts.RequireParentChain {
+			err := fmt.Errorf("%w: %s", ErrChainCycle, key)
+			if opts.requireParentChain() {
 				return err
 			}
 			d.parentErr = err
 			return nil
+		} else if key != "" {
+			seen[key] = true
 		}
-		seen[parent.Identifier()] = true
 
 		if err := current.SetParent(parent); err != nil {
 			parent.Close()
-			if opts.RequireParentChain {
+			if opts.requireParentChain() {
 				return err
 			}
 			d.parentErr = err
@@ -363,10 +438,12 @@ func (d *VirtualDisk) resolveChain(opts *Options) error {
 	return nil
 }
 
-// openParent opens a resolved parent source, preferring the child's format but
-// falling back to signature detection so a VHDX child with a VHD parent (or the
-// reverse, which some tools produce) still opens.
-func openParent(src ParentSource, childFormat types.FileFormat, allowDirty bool) (*VirtualDisk, error) {
+// openParent opens a resolved parent source.
+//
+// The format is taken from the parent's own signature rather than assumed from
+// the child's, so a VHDX child with a VHD parent -- which some tools produce --
+// still opens.
+func openParent(src ParentSource, allowDirty bool) (*VirtualDisk, error) {
 	format, err := detectFormat(src.ReaderAt)
 	if err != nil {
 		return nil, err
@@ -387,32 +464,115 @@ func openParent(src ParentSource, childFormat types.FileFormat, allowDirty bool)
 	return OpenVHD(src.ReaderAt, size)
 }
 
+// chainKey identifies a disk for cycle detection.
+//
+// The disk GUID alone is not a safe key. A VHDX that omits the Virtual Disk
+// Identifier metadata item reports the zero GUID, and images cloned by copying a
+// file share one, so two genuinely different disks can collide and be reported
+// as a cycle that is not there. A cycle means revisiting the same file, so the
+// backing path is the more faithful signal wherever one exists.
+//
+// An empty result means the disk cannot be identified; the caller then relies on
+// MaxChainDepth to bound the walk rather than guessing.
+func chainKey(d *VirtualDisk) string {
+	if d.path != "" {
+		path := d.path
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		path = filepath.Clean(path)
+		if runtime.GOOS == "windows" {
+			// Windows paths are case-insensitive, so the same file reached by
+			// differently-cased names must produce one key.
+			path = strings.ToLower(path)
+		}
+		return "path:" + path
+	}
+	if id := d.Identifier(); id != ([16]byte{}) {
+		return "guid:" + binaryutil.GUIDToString(id)
+	}
+	return ""
+}
+
 // verifyParent checks that a resolved image really is the parent the child
 // expects. Without this, any image of the right virtual size would be accepted,
 // which would produce a plausible but wrong device.
-func verifyParent(child, parent *VirtualDisk, opts *Options) error {
+//
+// src carries what the resolver learned about the file itself, which is where
+// the parent's modification time comes from. Checks that cannot be decisive are
+// recorded as warnings on the child rather than failing the open, so a caller
+// gets the image and the caveat instead of one or the other.
+func verifyParent(child, parent *VirtualDisk, src ParentSource, opts *Options) error {
 	if parent.Size() != child.Size() {
 		return fmt.Errorf("%w: parent virtual size %d != child %d",
 			ErrParentMismatch, parent.Size(), child.Size())
 	}
 
+	child.checkParentTimestamp(src)
+
 	if opts != nil && opts.AllowParentGUIDMismatch {
+		child.warn(WarningParentIdentityUnchecked,
+			"parent %q accepted without identity verification, because AllowParentGUIDMismatch is set",
+			src.Name)
 		return nil
 	}
 
 	want := child.ParentIdentifier()
 	if want == ([16]byte{}) {
-		// The child records no parent identifier; nothing further to check.
+		// The child records no parent identifier, so the only check this parent
+		// could be held to was virtual size -- which any image of the same size
+		// satisfies. That is exactly the condition that let a wrong parent be
+		// attached before v0.3.0, so it is worth saying out loud even when it
+		// is the image's own fault rather than the library's.
+		child.warn(WarningParentIdentityUnverifiable,
+			"child records no parent identifier, so parent %q was matched on virtual size alone",
+			src.Name)
 		return nil
 	}
 
-	if got := parent.Identifier(); got != want {
-		return fmt.Errorf("%w: parent identifier %s != expected %s",
+	if got := parent.parentLinkIdentity(); got != want {
+		return fmt.Errorf("%w: parent %s identifier %s != the %s the child records",
 			ErrParentMismatch,
+			parent.Format(),
 			binaryutil.GUIDToString(got),
 			binaryutil.GUIDToString(want))
 	}
 	return nil
+}
+
+// checkParentTimestamp compares the parent modification time a VHD child
+// records against the file the resolver actually found.
+//
+// A mismatch means the parent has been written to since the child was created,
+// which makes the reconstructed device wrong in a way no other check detects:
+// the identifier still matches, the size still matches, and the blocks the
+// child does not override now hold different data than they did.
+//
+// It is only ever a warning. Filesystem modification times do not survive a
+// copy, so a chain moved between machines mismatches routinely and is still the
+// right chain. Failing the open here would refuse far more good images than bad
+// ones.
+func (d *VirtualDisk) checkParentTimestamp(src ParentSource) {
+	if d.dynHeader == nil {
+		// VHDX records no parent timestamp; there is nothing to compare.
+		return
+	}
+	recorded := d.dynHeader.ParentModTime
+	if recorded.IsZero() || src.ModTime.IsZero() {
+		return
+	}
+
+	// VHD stores whole seconds, so compare at that resolution.
+	actual := src.ModTime.UTC().Truncate(time.Second)
+	if recorded.Equal(actual) {
+		return
+	}
+
+	d.warn(WarningParentTimestampMismatch,
+		"child records parent %q modified at %s, but the file found is dated %s",
+		src.Name,
+		recorded.Format(time.RFC3339),
+		actual.Format(time.RFC3339))
 }
 
 func closeSource(src ParentSource) {

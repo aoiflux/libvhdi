@@ -56,7 +56,7 @@ func main() {
 
 	if disk.IsDifferencing() {
 		fmt.Printf("parent_filename  : %s\n", disk.ParentFilename())
-		fmt.Printf("parent_id        : %s\n", guidToString(disk.ParentIdentifier()))
+		fmt.Printf("parent_id        : %s\n", libvhdi.GUIDString(disk.ParentIdentifier()))
 	}
 }
 
@@ -79,9 +79,4 @@ func formatSize(b uint64) string {
 	default:
 		return fmt.Sprintf("%d bytes", b)
 	}
-}
-
-func guidToString(guid [16]byte) string {
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%x",
-		guid[0:4], guid[4:6], guid[6:8], guid[8:10], guid[10:16])
 }

@@ -10,6 +10,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -100,9 +101,10 @@ func hexDump(data []byte, baseOffset int64) {
 			baseOffset+int64(i), cols*3+1, hexPart.String(), asciiPart.String())
 	}
 
-	// Print SHA-256-style summary line
 	if len(data) > 0 {
-		fmt.Printf("\n%d bytes read\n", len(data))
-		_ = hex.EncodeToString // imported for doc purposes; full digest not computed here
+		// The digest names what was read, so a transcript of this output can be
+		// checked back against the image later.
+		sum := sha256.Sum256(data)
+		fmt.Printf("\n%d bytes read\nsha256  %s\n", len(data), hex.EncodeToString(sum[:]))
 	}
 }

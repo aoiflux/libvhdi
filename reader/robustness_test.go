@@ -382,6 +382,14 @@ func FuzzOpen(f *testing.F) {
 	f.Add([]byte(types.VHDXFileSignature))
 	f.Add([]byte(types.VHDFooterSignature))
 
+	// Seeds for the footer recovery paths added in v0.3.0. Recovery code is
+	// where a parser is most easily tricked, because it runs precisely when the
+	// conformant structures have already failed -- so the fuzzer should start
+	// from inputs that reach it rather than having to discover them.
+	for _, seed := range recoverySeeds() {
+		f.Add(seed)
+	}
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d, err := Open(bytes.NewReader(data), nil)
 		if err != nil {
@@ -530,4 +538,42 @@ func TestVHDXCRCPolynomial(t *testing.T) {
 	if got := binaryutil.CRC32([]byte("123456789")); got != 0xE3069283 {
 		t.Errorf("CRC32 check value = %#x, want 0xE3069283 (CRC-32C)", got)
 	}
+}
+
+// recoverySeeds returns images that exercise the footer recovery paths.
+//
+// Each one opens successfully today by a route other than the conformant
+// trailing footer, which is what makes them useful starting points: a mutation
+// of one is far more likely to reach the recovery code than a mutation of a
+// random buffer.
+func recoverySeeds() [][]byte {
+	var out [][]byte
+
+	// A 511-byte legacy footer, as Virtual PC wrote before the format was
+	// documented.
+	full := buildFixedVHD(4096, nil)
+	out = append(out, append([]byte(nil), full[:len(full)-1]...))
+
+	// A dynamic image whose trailing footer is destroyed, recoverable only from
+	// the mirror at offset 0.
+	mirrorOnly := validDynamicVHD()
+	tail := mirrorOnly[len(mirrorOnly)-vhdFooterLen:]
+	for i := range tail {
+		tail[i] = 0xDB
+	}
+	out = append(out, mirrorOnly)
+
+	// A fixed image carrying a valid footer at offset 0 as ordinary payload,
+	// with its real footer destroyed. This must stay refused: offset 0 on a
+	// fixed disk is data, not a mirror.
+	decoy := buildFixedVHD(4096, nil)
+	footerBytes := append([]byte(nil), decoy[4096:]...)
+	trap := buildFixedVHD(4096, func(payload []byte) { copy(payload, footerBytes) })
+	trapTail := trap[len(trap)-vhdFooterLen:]
+	for i := range trapTail {
+		trapTail[i] = 0xDB
+	}
+	out = append(out, trap)
+
+	return out
 }

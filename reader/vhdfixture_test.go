@@ -4,6 +4,7 @@ package reader
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/aoiflux/libvhdi/types"
 )
@@ -41,6 +42,23 @@ type vhdFooterParams struct {
 	mediaSize  uint64
 	nextOffset uint64
 	identifier [16]byte
+
+	// createdAt is the footer's own time stamp. The zero value writes a zero
+	// field, which means "not recorded".
+	createdAt time.Time
+
+	// dataSize is the disk's size at creation. Zero writes mediaSize, which is
+	// what an image that has never been expanded carries.
+	dataSize uint64
+
+	// cylinders, heads and sectorsPerTrack are the CHS geometry. All zero
+	// writes a zero geometry, which is what most modern producers emit.
+	cylinders       uint16
+	heads           uint8
+	sectorsPerTrack uint8
+
+	// savedState marks an image saved from a running machine.
+	savedState bool
 }
 
 // writeVHDFooter serialises a 512-byte VHD footer into dst (which must be at
@@ -53,17 +71,24 @@ func writeVHDFooter(dst []byte, p vhdFooterParams) {
 	binary.BigEndian.PutUint32(f[8:12], 0x00000002) // features: reserved bit
 	binary.BigEndian.PutUint32(f[12:16], 0x00010000)
 	binary.BigEndian.PutUint64(f[16:24], p.nextOffset)
-	binary.BigEndian.PutUint32(f[24:28], 0)          // modification time
+	binary.BigEndian.PutUint32(f[24:28], vhdTimestampRaw(p.createdAt))
 	binary.BigEndian.PutUint32(f[28:32], 0x6C696276) // creator app "libv"
 	binary.BigEndian.PutUint32(f[32:36], 0x00010000) // creator version
 	binary.BigEndian.PutUint32(f[36:40], 0x5769326B) // creator OS "Wi2k"
 	binary.BigEndian.PutUint64(f[40:48], p.mediaSize)
-	binary.BigEndian.PutUint64(f[48:56], p.mediaSize)
-	binary.BigEndian.PutUint32(f[56:60], 0) // disk geometry (CHS, unused here)
+	dataSize := p.dataSize
+	if dataSize == 0 {
+		dataSize = p.mediaSize
+	}
+	binary.BigEndian.PutUint64(f[48:56], dataSize)
+	geometry := uint32(p.cylinders)<<16 | uint32(p.heads)<<8 | uint32(p.sectorsPerTrack)
+	binary.BigEndian.PutUint32(f[56:60], geometry)
 	binary.BigEndian.PutUint32(f[60:64], uint32(p.diskType))
 	binary.BigEndian.PutUint32(f[64:68], 0) // checksum placeholder
 	copy(f[68:84], p.identifier[:])
-	f[84] = 0 // saved state
+	if p.savedState {
+		f[84] = 1
+	}
 
 	binary.BigEndian.PutUint32(f[64:68], vhdSpecChecksum(f))
 }
@@ -76,6 +101,11 @@ type vhdDynHeaderParams struct {
 	blockSize        uint32
 	parentIdentifier [16]byte
 	parentFilename   string
+
+	// parentModTime is the parent's modification time as the child records it.
+	// The zero value writes a zero field, which is what a non-differencing disk
+	// carries and which means "not recorded".
+	parentModTime time.Time
 }
 
 // writeVHDDynHeader serialises a 1024-byte VHD dynamic disk header into dst
@@ -92,7 +122,7 @@ func writeVHDDynHeader(dst []byte, p vhdDynHeaderParams) {
 	binary.BigEndian.PutUint32(h[32:36], p.blockSize)
 	binary.BigEndian.PutUint32(h[36:40], 0) // checksum placeholder
 	copy(h[40:56], p.parentIdentifier[:])
-	binary.BigEndian.PutUint32(h[56:60], 0) // parent modification time
+	binary.BigEndian.PutUint32(h[56:60], vhdTimestampRaw(p.parentModTime))
 	// h[60:64] reserved1
 
 	// Parent filename: 512 bytes of UTF-16 big-endian at offset 64.
@@ -122,10 +152,21 @@ func clearBytes(b []byte) {
 
 // vhdSectorBitmapSize mirrors the sector bitmap sizing the BAT parser uses:
 // one bit per 512-byte sector, rounded up to a 512-byte boundary.
+// vhdSectorBitmapSize mirrors the library's own bitmap sizing. The two must
+// agree exactly: a fixture that lays blocks out on a different stride than the
+// parser expects tests nothing.
 func vhdSectorBitmapSize(blockSize uint32) uint32 {
-	n := blockSize / (512 * 8)
-	if n%512 != 0 {
-		n = (n/512 + 1) * 512
+	const sectorSize = 512
+
+	n := blockSize / (sectorSize * 8)
+	if blockSize%(sectorSize*8) != 0 {
+		n++
+	}
+	if rem := n % sectorSize; rem != 0 {
+		n += sectorSize - rem
+	}
+	if n == 0 {
+		n = sectorSize
 	}
 	return n
 }
@@ -171,6 +212,20 @@ type vhdImageParams struct {
 	// the child's dynamic header.
 	parentName string
 	parentID   [16]byte
+
+	// parentModTime is the parent modification time recorded in the child's
+	// dynamic header.
+	parentModTime time.Time
+
+	// createdAt, dataSize, savedState and the CHS triple are footer fields the
+	// provenance and geometry accessors surface. Their zero values produce the
+	// footer a plain fixture carries.
+	createdAt       time.Time
+	dataSize        uint64
+	savedState      bool
+	cylinders       uint16
+	heads           uint8
+	sectorsPerTrack uint8
 
 	// selfID is this image's own identifier. Every disk in a chain needs a
 	// distinct one, both so a child can name its parent unambiguously and so
@@ -230,10 +285,16 @@ func buildVHD(p vhdImageParams) []byte {
 	}
 
 	footer := vhdFooterParams{
-		diskType:   diskType,
-		mediaSize:  mediaSize,
-		nextOffset: uint64(dynHeaderOff),
-		identifier: selfID,
+		diskType:        diskType,
+		mediaSize:       mediaSize,
+		nextOffset:      uint64(dynHeaderOff),
+		identifier:      selfID,
+		createdAt:       p.createdAt,
+		dataSize:        p.dataSize,
+		savedState:      p.savedState,
+		cylinders:       p.cylinders,
+		heads:           p.heads,
+		sectorsPerTrack: p.sectorsPerTrack,
 	}
 	writeVHDFooter(img[footerCopyOff:], footer)
 	writeVHDFooter(img[total-vhdFooterLen:], footer)
@@ -244,6 +305,7 @@ func buildVHD(p vhdImageParams) []byte {
 		blockSize:        blockSize,
 		parentIdentifier: p.parentID,
 		parentFilename:   p.parentName,
+		parentModTime:    p.parentModTime,
 	})
 
 	cursor := dataStart

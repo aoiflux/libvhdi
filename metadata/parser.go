@@ -6,9 +6,9 @@ package metadata
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"unicode/utf16"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
@@ -28,6 +28,12 @@ const (
 
 	// parentLocatorEntrySize is two 4-byte offsets and two 2-byte lengths.
 	parentLocatorEntrySize = 12
+
+	// maxMetadataItemSize is the largest metadata item MS-VHDX permits. The
+	// largest this library actually reads is a parent locator of a few hundred
+	// bytes, so anything near this bound is already anomalous -- the check is
+	// here to stop a crafted length from driving a huge read, not to admit one.
+	maxMetadataItemSize = 1 << 20
 )
 
 // Parser parses the VHDX metadata region and extracts structured values.
@@ -61,7 +67,8 @@ func (p *Parser) readTable() ([]types.ParsedMetadataTableEntry, error) {
 		return nil, err
 	}
 	if !bytes.Equal(sig, []byte(types.VHDXMetadataSignature)) {
-		return nil, errors.New("invalid VHDX metadata table signature")
+		return nil, types.Corruptf("read VHDX metadata table", types.FileFormatVHDX,
+			p.regionOffset, "Signature", "signature is not %q", types.VHDXMetadataSignature)
 	}
 
 	// Reserved (2 bytes)
@@ -81,7 +88,9 @@ func (p *Parser) readTable() ([]types.ParsedMetadataTableEntry, error) {
 	if p.regionSize > 0 {
 		maxEntries := (p.regionSize - metadataTableHeaderSize) / metadataTableEntrySize
 		if uint32(numEntries) > maxEntries {
-			return nil, fmt.Errorf("VHDX metadata table declares %d entries but the %d byte region holds at most %d",
+			return nil, types.Corruptf("read VHDX metadata table", types.FileFormatVHDX,
+				p.regionOffset, "Entry Count",
+				"declares %d entries but the %d byte region holds at most %d",
 				numEntries, p.regionSize, maxEntries)
 		}
 	}
@@ -124,15 +133,88 @@ func (p *Parser) readTable() ([]types.ParsedMetadataTableEntry, error) {
 			return nil, err
 		}
 
-		entries = append(entries, types.ParsedMetadataTableEntry{
+		entry := types.ParsedMetadataTableEntry{
 			ItemIdentifier: guid,
 			ItemOffset:     itemOffset,
 			ItemSize:       itemSize,
 			IsRequired:     (flags>>2)&1 == 1,
-		})
+		}
+		if err := p.validateEntry(entry, uint32(numEntries)); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
 	}
 
 	return entries, nil
+}
+
+// validateEntry bounds one metadata table entry against the region that
+// contains it.
+//
+// Both ItemOffset and ItemSize come straight out of the image and are used to
+// seek and read, so an unchecked pair reads outside the metadata region
+// entirely -- at best an I/O error from deep inside a value parser, at worst a
+// structure decoded out of unrelated bytes and reported as metadata.
+func (p *Parser) validateEntry(e types.ParsedMetadataTableEntry, numEntries uint32) error {
+	name := metadataItemName(e.ItemIdentifier)
+	const op = "read VHDX metadata table"
+	at := p.regionOffset + int64(e.ItemOffset)
+
+	if e.ItemSize == 0 {
+		// A zero-length item has no data, so it must not claim a location
+		// either. The pair is meaningless otherwise.
+		if e.ItemOffset != 0 {
+			return types.Corruptf(op, types.FileFormatVHDX, at, name,
+				"zero length but a non-zero offset %d", e.ItemOffset)
+		}
+		return nil
+	}
+
+	if e.ItemSize > maxMetadataItemSize {
+		return types.Corruptf(op, types.FileFormatVHDX, at, name,
+			"declares %d bytes, more than the %d byte maximum", e.ItemSize, maxMetadataItemSize)
+	}
+
+	// The table header and its entries occupy the start of the region. An item
+	// claiming to live inside the table describes its own directory as its
+	// payload, which no conformant producer emits.
+	tableEnd := uint64(metadataTableHeaderSize) + uint64(numEntries)*metadataTableEntrySize
+	if uint64(e.ItemOffset) < tableEnd {
+		return types.Corruptf(op, types.FileFormatVHDX, at, name,
+			"item at region offset %d overlaps the metadata table, which ends at %d",
+			e.ItemOffset, tableEnd)
+	}
+
+	if p.regionSize > 0 {
+		end := uint64(e.ItemOffset) + uint64(e.ItemSize)
+		if end > uint64(p.regionSize) {
+			return types.Corruptf(op, types.FileFormatVHDX, at, name,
+				"spans %d bytes from region offset %d, past the end of the %d byte metadata region",
+				e.ItemSize, e.ItemOffset, p.regionSize)
+		}
+	}
+
+	return nil
+}
+
+// metadataItemName labels a metadata item for an error message.
+func metadataItemName(id [16]byte) string {
+	switch id {
+	case types.MetadataItemFileParameters:
+		return "File Parameters"
+	case types.MetadataItemVirtualDiskSize:
+		return "Virtual Disk Size"
+	case types.MetadataItemLogicalSectorSize:
+		return "Logical Sector Size"
+	case types.MetadataItemPhysicalSectorSize:
+		return "Physical Sector Size"
+	case types.MetadataItemVirtualDiskIdentifier:
+		return "Virtual Disk Identifier"
+	case types.MetadataItemParentLocator:
+		return "Parent Locator"
+	default:
+		return "unknown (" + binaryutil.GUIDToString(id) + ")"
+	}
 }
 
 // extractValues finds and decodes each known metadata item by GUID.
@@ -143,6 +225,13 @@ func (p *Parser) extractValues(entries []types.ParsedMetadataTableEntry) (*types
 	}
 
 	for _, entry := range entries {
+		// A zero-length item carries no data. Its offset is required to be zero
+		// too, so parsing it anyway would decode the metadata table's own header
+		// as a value -- and the signature bytes make a plausible-looking one.
+		if entry.ItemSize == 0 {
+			continue
+		}
+
 		// Item data is at p.regionOffset + entry.ItemOffset
 		itemOffset := p.regionOffset + int64(entry.ItemOffset)
 
@@ -172,9 +261,14 @@ func (p *Parser) extractValues(entries []types.ParsedMetadataTableEntry) (*types
 				return nil, err
 			}
 		default:
-			// Unknown metadata item: fail if marked required.
+			// An unknown item marked required means the image cannot be
+			// understood without something this library does not implement.
+			// Decoding the rest and ignoring it would produce a device that is
+			// wrong in a way nothing downstream can detect.
 			if entry.IsRequired {
-				return nil, errors.New("VHDX metadata table contains unknown required item")
+				return nil, types.Unsupportedf("read VHDX metadata", types.FileFormatVHDX,
+					itemOffset, "Metadata Table Entry",
+					"unknown required item %s", metadataItemName(entry.ItemIdentifier))
 			}
 		}
 	}
@@ -212,7 +306,9 @@ func (p *Parser) parseFileParameters(offset int64, vals *types.MetadataValues) e
 	const minBlockSize = 1 << 20         // 1 MB
 	const maxBlockSize = 256 * (1 << 20) // 256 MB
 	if blockSize < minBlockSize || blockSize > maxBlockSize || blockSize%512 != 0 {
-		return errors.New("invalid VHDX block size")
+		return types.Corruptf("read VHDX file parameters", types.FileFormatVHDX, offset, "BlockSize",
+			"block size %d is outside the permitted 1 MB to 256 MB range or is not a multiple of 512",
+			blockSize)
 	}
 
 	return nil
@@ -239,7 +335,8 @@ func (p *Parser) parseLogicalSectorSize(offset int64, vals *types.MetadataValues
 		return err
 	}
 	if size != 512 && size != 4096 {
-		return errors.New("invalid VHDX logical sector size: must be 512 or 4096")
+		return types.Corruptf("read VHDX logical sector size", types.FileFormatVHDX, offset,
+			"LogicalSectorSize", "sector size %d, the format permits only 512 or 4096", size)
 	}
 	vals.LogicalSectorSize = size
 	return nil
@@ -254,7 +351,8 @@ func (p *Parser) parsePhysicalSectorSize(offset int64, vals *types.MetadataValue
 		return err
 	}
 	if size != 512 && size != 4096 {
-		return errors.New("invalid VHDX physical sector size: must be 512 or 4096")
+		return types.Corruptf("read VHDX physical sector size", types.FileFormatVHDX, offset,
+			"PhysicalSectorSize", "sector size %d, the format permits only 512 or 4096", size)
 	}
 	vals.PhysicalSectorSize = size
 	return nil
@@ -278,13 +376,20 @@ func (p *Parser) parseVirtualDiskIdentifier(offset int64, vals *types.MetadataVa
 func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.MetadataValues) error {
 	br := binaryutil.NewReadAtReader(p.reader, offset)
 
-	// Locator type GUID (16 bytes)
+	// Locator type GUID (16 bytes). The specification defines exactly one type,
+	// and its keys are only meaningful under that type, so an image declaring a
+	// different one is describing its parent by a scheme this parser does not
+	// understand. Reading its entries as paths would invent a parent.
 	locatorTypeRaw, err := br.ReadBytes(16)
 	if err != nil {
 		return err
 	}
-	// We don't validate the type GUID further here; parent paths are in the entries.
-	_ = locatorTypeRaw
+	var locatorType [16]byte
+	copy(locatorType[:], locatorTypeRaw)
+	if locatorType != types.ParentLocatorTypeVHDX {
+		return fmt.Errorf("VHDX parent locator declares unsupported type %s",
+			binaryutil.GUIDToString(locatorType))
+	}
 
 	// Reserved (2 bytes)
 	if _, err = br.ReadBytes(2); err != nil {
@@ -365,7 +470,6 @@ func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.Metad
 		key := decodeUTF16LE(keyBytes)
 		value := decodeUTF16LE(valBytes)
 
-		// The "relative_path" or "absolute_win32_path" key identifies the parent path
 		switch key {
 		case "relative_path", "absolute_win32_path", "volume_path":
 			if vals.ParentFilename == "" {
@@ -377,10 +481,33 @@ func (p *Parser) parseParentLocator(offset int64, size uint32, vals *types.Metad
 				Key:   key,
 				Value: value,
 			})
+
+		case "parent_linkage":
+			// The identity half of the locator: the GUID the parent must carry
+			// for this chain to be the one the child was built on. Without it a
+			// parent can only be checked by virtual size, which any same-sized
+			// image satisfies. Deliberately not appended to ParentLocators,
+			// whose entries are treated as candidate paths.
+			guid, err := parseLocatorGUID(value)
+			if err != nil {
+				return fmt.Errorf("VHDX parent locator has malformed parent_linkage %q: %w", value, err)
+			}
+			vals.ParentIdentifier = guid
 		}
 	}
 
 	return nil
+}
+
+// parseLocatorGUID parses a parent locator GUID value, which the specification
+// writes in registry form with surrounding braces. The result is in the same
+// on-disk byte order as the GUIDs read from the image header, so the two are
+// directly comparable.
+func parseLocatorGUID(value string) ([16]byte, error) {
+	s := strings.TrimSpace(value)
+	s = strings.TrimPrefix(s, "{")
+	s = strings.TrimSuffix(s, "}")
+	return binaryutil.GUIDFromString(s)
 }
 
 // decodeUTF16LE decodes a UTF-16 little-endian byte slice to a Go string.

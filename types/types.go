@@ -3,6 +3,8 @@
 // Package types defines all data structures, enums, and constants for the libvhdi library.
 package types
 
+import "fmt"
+
 import (
 	"time"
 )
@@ -29,13 +31,34 @@ const (
 	DiskTypeDifferential DiskType = 0x00000004
 )
 
-// AccessFlag represents file access mode.
-type AccessFlag int
+// String returns the format name, so errors and reports read as "VHDX" rather
+// than as an integer whose meaning the reader has to look up.
+func (f FileFormat) String() string {
+	switch f {
+	case FileFormatVHD:
+		return "VHD"
+	case FileFormatVHDX:
+		return "VHDX"
+	default:
+		return "unknown"
+	}
+}
 
-const (
-	AccessFlagRead  AccessFlag = 0x01
-	AccessFlagWrite AccessFlag = 0x02
-)
+// String returns the disk type name. Unknown values render with their numeric
+// value, since a disk type this library does not recognise is exactly the detail
+// a reader of the error needs.
+func (t DiskType) String() string {
+	switch t {
+	case DiskTypeFixed:
+		return "fixed"
+	case DiskTypeDynamic:
+		return "dynamic"
+	case DiskTypeDifferential:
+		return "differencing"
+	default:
+		return fmt.Sprintf("unknown(%#x)", uint32(t))
+	}
+}
 
 // BlockState represents the allocation state of a block (VHDX).
 type BlockState uint8
@@ -110,16 +133,6 @@ const (
 )
 
 // ============================================================================
-// CHECKSUM & CRC-32 CONFIGURATION
-// ============================================================================
-
-const (
-	CRC32Polynomial = 0x82f63b78
-	CRC32Initial    = 0xFFFFFFFF
-	CRC32FinalXOR   = 0xFFFFFFFF
-)
-
-// ============================================================================
 // VHD FILE FOOTER (512 bytes, at EOF)
 // ============================================================================
 
@@ -153,6 +166,39 @@ type ParsedFileFooter struct {
 	Identifier    [16]byte
 	ModTime       time.Time
 	CreatorApp    string
+
+	// Features is the footer's feature flag word. Bit 1 means the image has a
+	// temporary-disk marker and bit 0 is reserved; bit 31 is always set in a
+	// conformant image.
+	Features uint32
+
+	// CreatorVersion is the creating application's version, packed as two
+	// 16-bit halves, and CreatorOS is its host operating system as a four-byte
+	// code ("Wi2k" for Windows, "Mac " for Macintosh).
+	//
+	// Both identify the producer of an image, which is exactly the kind of fact
+	// an examiner reasons about when two images disagree.
+	CreatorVersion uint32
+	CreatorOS      string
+
+	// DataSize is the disk's size at creation time, where MediaSize is its
+	// current size. The two differ on an image that has been expanded, and the
+	// difference is the only record that the expansion happened.
+	DataSize uint64
+
+	// Cylinders, Heads and SectorsPerTrack are the CHS geometry the footer
+	// records. Modern tools ignore CHS, but the values still constrain how a
+	// legacy guest partitions the disk, and a zero geometry is itself a fact
+	// worth reporting.
+	Cylinders       uint16
+	Heads           uint8
+	SectorsPerTrack uint8
+
+	// SavedState marks an image saved from a running machine with memory state
+	// held elsewhere. Its filesystem is a crash-consistent snapshot, not a
+	// cleanly unmounted one, which changes what its contents can be taken to
+	// mean.
+	SavedState bool
 }
 
 // ============================================================================
@@ -192,11 +238,6 @@ type ParsedDynamicDiskHeader struct {
 // ============================================================================
 // VHD PARENT LOCATOR STRUCTURES
 // ============================================================================
-
-// ParentLocatorHeader represents a parent locator header (4 bytes).
-type ParentLocatorHeader struct {
-	NumberOfEntries uint32 // Big-endian
-}
 
 // ParentLocatorEntry represents a single parent locator entry.
 type ParentLocatorEntry struct {
@@ -389,20 +430,6 @@ type MetadataValues struct {
 }
 
 // ============================================================================
-// IO HANDLE (Internal state)
-// ============================================================================
-
-// IOHandle represents the internal I/O state for an open file.
-type IOHandle struct {
-	FileType       FileFormat
-	DiskType       DiskType
-	MediaSize      uint64 // Virtual disk size
-	BytesPerSector uint32
-	BlockSize      uint32
-	Abort          bool
-}
-
-// ============================================================================
 // REGION TYPE IDENTIFIERS (GUIDs for VHDX regions)
 // ============================================================================
 
@@ -438,6 +465,14 @@ var (
 
 	// Virtual disk size
 	MetadataItemVirtualDiskSize = [16]byte{0x24, 0x42, 0xa5, 0x2f, 0x1b, 0xcd, 0x76, 0x48, 0xb2, 0x11, 0x5d, 0xbe, 0xd8, 0x3b, 0xf4, 0xb8}
+)
+
+// Parent locator type identifiers (as byte arrays, little-endian stored)
+var (
+	// ParentLocatorTypeVHDX is the only locator type the VHDX specification
+	// defines. An image declaring a different type describes its parent by some
+	// other scheme, so its entries must not be read as VHDX parent locator keys.
+	ParentLocatorTypeVHDX = [16]byte{0xb7, 0xef, 0x4a, 0xb0, 0x9e, 0xd1, 0x81, 0x4a, 0xb7, 0x89, 0x25, 0xb8, 0xe9, 0x44, 0x59, 0x13}
 )
 
 // ============================================================================

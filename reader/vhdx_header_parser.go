@@ -6,9 +6,9 @@ package reader
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
@@ -28,30 +28,35 @@ func NewVHDXFileInfoParser(r io.ReaderAt) *VHDXFileInfoParser {
 	return &VHDXFileInfoParser{reader: r}
 }
 
-// ReadFileInfo reads VHDX file information from offset 0.
+// ReadFileInfo reads the VHDX file identifier at offset 0.
+//
+// The structure is the 8-byte signature followed by a 512-byte Creator field
+// naming the tool that produced the image. That string is the only provenance
+// VHDX records about its producer, which makes it worth reading even though
+// nothing about decoding the image depends on it.
 func (p *VHDXFileInfoParser) ReadFileInfo() (*types.ParsedFileInformation, error) {
 	br := binaryutil.NewReadAtReader(p.reader, 0)
 
-	// Read signature (8 bytes)
 	sig, err := br.ReadBytes(8)
 	if err != nil {
 		return nil, err
 	}
-
-	// Verify signature
 	if !bytes.Equal(sig, []byte(types.VHDXFileSignature)) {
-		return nil, errors.New("invalid VHDX file signature")
+		return nil, types.Corruptf("read VHDX file identifier", types.FileFormatVHDX, 0, "Signature",
+			"signature is %q, not %q", printableSignature(sig), types.VHDXFileSignature)
 	}
 
-	// Read creator string (512 bytes, UTF-8)
-	creator, err := br.ReadString(512)
+	// The Creator field is 512 bytes of UTF-16 little-endian, not bytes. Read
+	// as a NUL-terminated byte string it stops at the high byte of the first
+	// character, so "Microsoft Windows 10.0" decodes as "M".
+	raw, err := br.ReadBytes(512)
 	if err != nil {
 		return nil, err
 	}
 
 	return &types.ParsedFileInformation{
 		Signature: string(sig),
-		Creator:   creator,
+		Creator:   strings.TrimSpace(decodeUTF16LE(raw)),
 	}, nil
 }
 
@@ -87,7 +92,13 @@ func (p *VHDXImageHeaderParser) ReadImageHeader() (*types.ParsedImageHeader, err
 	case err2 == nil:
 		return secondary, nil
 	default:
-		return nil, errors.New("could not read valid VHDX image header")
+		// Both copies failed. Report both reasons: the two headers fail for
+		// different causes often enough that one of them is usually the lead.
+		return nil, fmt.Errorf(
+			"%w: neither VHDX header could be read: primary at %d: %v; secondary at %d: %v",
+			types.ErrCorruptImage,
+			types.VHDXFirstHeaderOffset, err1,
+			types.VHDXSecondHeaderOffset, err2)
 	}
 }
 
@@ -102,7 +113,8 @@ func (p *VHDXImageHeaderParser) ReadImageHeaderAt(offset int64) (*types.ParsedIm
 
 	// Validate signature ("head").
 	if !bytes.Equal(buf[0:4], []byte(types.VHDXHeaderSignature)) {
-		return nil, errors.New("invalid VHDX image header signature")
+		return nil, types.Corruptf("read VHDX header", types.FileFormatVHDX, offset, "Signature",
+			"signature is %q, not %q", printableSignature(buf[0:4]), types.VHDXHeaderSignature)
 	}
 
 	// Verify CRC-32 over the full 4096 bytes with checksum field zeroed.
@@ -111,13 +123,15 @@ func (p *VHDXImageHeaderParser) ReadImageHeaderAt(offset int64) (*types.ParsedIm
 	computed := binaryutil.CRC32(buf)
 	binary.LittleEndian.PutUint32(buf[4:8], storedChecksum)
 	if computed != storedChecksum {
-		return nil, errors.New("VHDX image header CRC-32 mismatch")
+		return nil, types.Corruptf("read VHDX header", types.FileFormatVHDX, offset, "Checksum",
+			"stored CRC-32C %#08x does not match the computed %#08x", storedChecksum, computed)
 	}
 
 	// Validate format version (must be 0x0001).
 	formatVersion := binary.LittleEndian.Uint16(buf[66:68])
 	if formatVersion != 0x0001 {
-		return nil, errors.New("unsupported VHDX image header format version")
+		return nil, types.Unsupportedf("read VHDX header", types.FileFormatVHDX, offset, "Version",
+			"version %#04x, only 1 is implemented", formatVersion)
 	}
 
 	// Parse all fields from the raw buffer (all little-endian).
@@ -134,54 +148,6 @@ func (p *VHDXImageHeaderParser) ReadImageHeaderAt(offset int64) (*types.ParsedIm
 	copy(parsed.LogIdentifier[:], buf[48:64])
 
 	return parsed, nil
-}
-
-// VerifyImageHeaderChecksum verifies the image header's CRC-32 checksum.
-func (p *VHDXImageHeaderParser) VerifyImageHeaderChecksum(header *types.ImageHeader) bool {
-	// Checksum is calculated with the checksum field itself set to zero
-	// For VHDX, the checksum is calculated over the first 8 + 4016 = 4024 bytes (little-endian)
-	headerCopy := *header
-	headerCopy.Checksum = 0
-
-	// Serialize header to bytes (up to offset 4 + 4020 bytes of the actual 4096-byte header)
-	buf := imageHeaderToBytes(&headerCopy)
-
-	// Compute CRC-32
-	computed := binaryutil.CRC32(buf)
-
-	return computed == header.Checksum
-}
-
-// imageHeaderToBytes serializes an ImageHeader for checksum verification.
-func imageHeaderToBytes(header *types.ImageHeader) []byte {
-	buf := new(bytes.Buffer)
-
-	// Write signature (4 bytes)
-	buf.Write(header.Signature[:])
-
-	// Write checksum (4 bytes, little-endian) - set to zero for calculation
-	writeLE32(buf, header.Checksum)
-
-	// Write sequence number (8 bytes, little-endian)
-	writeLE64(buf, header.SequenceNumber)
-
-	// Write GUIDs (16 bytes each)
-	buf.Write(header.FileWriteIdentifier[:])
-	buf.Write(header.DataWriteIdentifier[:])
-	buf.Write(header.LogIdentifier[:])
-
-	// Write version fields (2+2 bytes)
-	writeLE16(buf, header.LogFormatVersion)
-	writeLE16(buf, header.FormatVersion)
-
-	// Write log size and offset (4+8 bytes)
-	writeLE32(buf, header.LogSize)
-	writeLE64(buf, header.LogOffset)
-
-	// Write reserved (4016 bytes)
-	buf.Write(header.Reserved[:])
-
-	return buf.Bytes()
 }
 
 // Helper functions for writing little-endian values
@@ -234,7 +200,8 @@ func (p *VHDXRegionTableParser) ReadRegionTableAt(offset int64) ([]types.ParsedR
 
 	// Validate signature.
 	if !bytes.Equal(buf[0:4], []byte(types.VHDXRegionSignature)) {
-		return nil, errors.New("invalid VHDX region table signature")
+		return nil, types.Corruptf("read VHDX region table", types.FileFormatVHDX, offset, "Signature",
+			"signature is %q, not %q", printableSignature(buf[0:4]), types.VHDXRegionSignature)
 	}
 
 	// Verify CRC-32 (polynomial 0x82f63b78, initial 0xFFFFFFFF, final XOR 0xFFFFFFFF).
@@ -247,7 +214,8 @@ func (p *VHDXRegionTableParser) ReadRegionTableAt(offset int64) ([]types.ParsedR
 	buf[6] = byte(storedChecksum >> 16)
 	buf[7] = byte(storedChecksum >> 24)
 	if computed != storedChecksum {
-		return nil, errors.New("VHDX region table CRC-32 mismatch")
+		return nil, types.Corruptf("read VHDX region table", types.FileFormatVHDX, offset, "Checksum",
+			"stored CRC-32C %#08x does not match the computed %#08x", storedChecksum, computed)
 	}
 
 	// Parse header fields (little-endian).
@@ -258,7 +226,8 @@ func (p *VHDXRegionTableParser) ReadRegionTableAt(offset int64) ([]types.ParsedR
 	// per-entry bounds test, whose uint32 offset arithmetic would wrap for very
 	// large counts.
 	if numEntries > maxRegionTableEntries {
-		return nil, fmt.Errorf("VHDX region table declares %d entries, more than the %d allowed",
+		return nil, types.Corruptf("read VHDX region table", types.FileFormatVHDX, offset, "Entry Count",
+			"declares %d entries, more than the %d the 64 KB region can hold",
 			numEntries, maxRegionTableEntries)
 	}
 
@@ -267,7 +236,9 @@ func (p *VHDXRegionTableParser) ReadRegionTableAt(offset int64) ([]types.ParsedR
 	for i := uint32(0); i < numEntries; i++ {
 		base := 16 + i*32
 		if int(base)+32 > len(buf) {
-			return nil, errors.New("region table entry extends beyond buffer")
+			return nil, types.Corruptf("read VHDX region table", types.FileFormatVHDX,
+				offset+int64(base), "Region Table Entry",
+				"entry %d extends past the end of the 64 KB region table", i)
 		}
 
 		var typeIDArray [16]byte

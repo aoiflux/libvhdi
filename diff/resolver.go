@@ -18,8 +18,13 @@ var ErrParentRequired = errors.New("libvhdi: differencing disk requires a parent
 
 // ErrNoBitmapSource is returned when a block can only be resolved by consulting
 // a sector bitmap but the resolver was built without access to the child's
-// backing file. Resolvers created through the deprecated NewVHDResolver and
-// NewVHDXResolver constructors are in this state.
+// backing file, meaning Config.Source was nil.
+//
+// Erroring is the only safe response. Both VHD and VHDX represent a partially
+// written block with a bitmap saying which sectors the child actually holds;
+// without it, the alternatives are to return the child's zero-filled holes as
+// though they were data, or the parent's bytes where the child has overwritten
+// them. Both produce a plausible device that is wrong.
 var ErrNoBitmapSource = errors.New("libvhdi: sector bitmap resolution requires the child's backing reader")
 
 // disposition describes where the bytes of a block live.
@@ -111,46 +116,6 @@ func New(cfg Config) (*Resolver, error) {
 		vhd:         cfg.VHDBAT,
 		vhdx:        cfg.VHDXBAT,
 	}, nil
-}
-
-// NewVHDResolver creates a differencing disk resolver for VHD format.
-//
-// Deprecated: this constructor cannot resolve partially-written blocks because
-// it has no access to the child's backing reader, and so cannot read sector
-// bitmaps. Such blocks return ErrNoBitmapSource rather than silently dropping
-// parent data. Use New with a populated Config.Source instead.
-func NewVHDResolver(child io.ReaderAt, parent io.ReaderAt, childBAT *types.VHDBlockAllocationTable, blockSize uint32, virtualSize uint64) *Resolver {
-	r, err := New(Config{
-		Child:       child,
-		Parent:      parent,
-		BlockSize:   blockSize,
-		VirtualSize: virtualSize,
-		VHDBAT:      childBAT,
-	})
-	if err != nil {
-		return &Resolver{child: child, parent: parent, vhd: childBAT}
-	}
-	return r
-}
-
-// NewVHDXResolver creates a differencing disk resolver for VHDX format.
-//
-// Deprecated: this constructor cannot resolve partially-present blocks because
-// it has no access to the child's backing reader, and so cannot read sector
-// bitmaps. Such blocks return ErrNoBitmapSource rather than silently dropping
-// parent data. Use New with a populated Config.Source instead.
-func NewVHDXResolver(child io.ReaderAt, parent io.ReaderAt, childBAT *types.VHDXBlockAllocationTable, blockSize uint32, virtualSize uint64) *Resolver {
-	r, err := New(Config{
-		Child:       child,
-		Parent:      parent,
-		BlockSize:   blockSize,
-		VirtualSize: virtualSize,
-		VHDXBAT:     childBAT,
-	})
-	if err != nil {
-		return &Resolver{child: child, parent: parent, vhdx: childBAT}
-	}
-	return r
 }
 
 // ReadAt implements io.ReaderAt over the child's virtual address space,

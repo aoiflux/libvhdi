@@ -33,11 +33,19 @@ type VirtualDisk struct {
 	blockSize   uint32
 	sectorSize  uint32
 
+	// creator names the tool that produced the image: the VHDX file
+	// identifier's creator string, or the VHD footer's creator application.
+	creator string
+
 	// Format-specific state
-	footer     *types.ParsedFileFooter        // VHD only
-	dynHeader  *types.ParsedDynamicDiskHeader // VHD dynamic/differential only
-	imgHeader  *types.ParsedImageHeader       // VHDX only
-	metaValues *types.MetadataValues          // VHDX only
+	footer *types.ParsedFileFooter // VHD only
+	// footerSource records which copy of the VHD footer the disk was opened
+	// from. Anything other than FooterSourceTrailing means the image is damaged
+	// and was recovered, which a forensic record has to state.
+	footerSource FooterSource
+	dynHeader    *types.ParsedDynamicDiskHeader // VHD dynamic/differential only
+	imgHeader    *types.ParsedImageHeader       // VHDX only
+	metaValues   *types.MetadataValues          // VHDX only
 
 	// Child BAT retained for differencing disk SetParent wiring.
 	childBATvhd  *types.VHDBlockAllocationTable
@@ -60,6 +68,11 @@ type VirtualDisk struct {
 	// parentErr records why best-effort chain resolution stopped, if it did.
 	parentErr error
 
+	// warnings records facts that do not prevent the image being read but that
+	// a provenance record has to state, such as having been recovered from a
+	// fallback footer or having accepted a parent that could not be verified.
+	warnings []Warning
+
 	// hasLog marks a VHDX image whose active header carries a log GUID, meaning
 	// it holds journalled writes.
 	hasLog bool
@@ -80,24 +93,31 @@ type VirtualDisk struct {
 // For differencing disks, call SetParent before reading.
 func OpenVHD(r io.ReaderAt, fileSize int64) (*VirtualDisk, error) {
 	fp := NewVHDFooterParser(r)
-	footer, err := fp.ReadFooterFromEnd(fileSize)
+	footer, footerSource, footerBytes, err := fp.readFooterWithRecovery(fileSize)
 	if err != nil {
 		return nil, err
 	}
 
 	d := &VirtualDisk{
-		source:      r,
-		fileSize:    fileSize,
-		format:      types.FileFormatVHD,
-		diskType:    footer.DiskType,
-		virtualSize: footer.MediaSize,
-		sectorSize:  types.DefaultSectorSize,
-		footer:      footer,
+		source:       r,
+		fileSize:     fileSize,
+		format:       types.FileFormatVHD,
+		diskType:     footer.DiskType,
+		virtualSize:  footer.MediaSize,
+		sectorSize:   types.DefaultSectorSize,
+		footer:       footer,
+		footerSource: footerSource,
+	}
+
+	if footerSource.Recovered() {
+		d.warn(WarningFooterRecovered,
+			"opened from the %s footer copy; the conformant trailing footer could not be read",
+			footerSource)
 	}
 
 	switch footer.DiskType {
 	case types.DiskTypeFixed:
-		if err := validateVHDFixed(footer, fileSize); err != nil {
+		if err := validateVHDFixed(footer, fileSize, footerBytes); err != nil {
 			return nil, err
 		}
 		// Fixed disk: data starts at offset 0, no BAT needed.
@@ -183,6 +203,15 @@ func openVHDX(r io.ReaderAt, fileSize int64, allowDirty bool) (*VirtualDisk, err
 		return nil, err
 	}
 
+	// The file identifier at offset 0 names the tool that produced the image.
+	// It is outside the log's reach, so it is read from the raw file, and a
+	// failure to decode it is not a reason to refuse the image: it is
+	// provenance, not structure.
+	var creator string
+	if info, err := NewVHDXFileInfoParser(r).ReadFileInfo(); err == nil {
+		creator = info.Creator
+	}
+
 	// A non-zero log GUID means the log holds writes that may not have reached
 	// their final locations, so the structures below could be stale.
 	hasLog := imgHeader.LogIdentifier != ([16]byte{})
@@ -214,49 +243,76 @@ func openVHDX(r io.ReaderAt, fileSize int64, allowDirty bool) (*VirtualDisk, err
 	// Parse region table. Try primary first (192KB), then secondary (256KB).
 	rtp := NewVHDXRegionTableParser(src)
 
-	locateRegions := func(regions []types.ParsedRegionTableEntry) (int64, int64, int64, uint32, error) {
-		var batOffset, batSize int64
-		var metaOffset int64
-		var metaSize uint32
+	// loadRegions reads one region table, checks it as a whole, and extracts the
+	// two pointers this library needs.
+	//
+	// The two tables are copies of each other, so a table that cannot be read or
+	// that is structurally malformed is recoverable from the other. A table that
+	// declares a region this parser does not understand and marks *required* is
+	// not: the image genuinely depends on a feature this library lacks, and
+	// reading it anyway would silently ignore whatever that region describes.
+	// The specification requires failing, so errUnknownRequiredRegion is fatal
+	// rather than a reason to consult the copy.
+	loadRegions := func(tableOffset int64) (ptrs vhdxRegionPointers, err error) {
+		regions, err := rtp.ReadRegionTableAt(tableOffset)
+		if err != nil {
+			return ptrs, err
+		}
+
+		// The unknown-required rule is checked before any structural check, and
+		// the order matters. A malformed entry is a reason to try the other
+		// table; an unknown required entry is a statement about what the image
+		// needs, which the other table makes too. Validating first would let a
+		// malformed unknown-required region be downgraded to "damaged table" and
+		// silently skipped.
 		for _, region := range regions {
 			switch region.TypeIdentifier {
-			case types.RegionTypeBAT:
-				batOffset = region.DataOffset
-				batSize = int64(region.DataSize)
-			case types.RegionTypeMetadata:
-				metaOffset = region.DataOffset
-				metaSize = region.DataSize
+			case types.RegionTypeBAT, types.RegionTypeMetadata:
 			default:
-				// Per spec: unknown entries with IsRequired=1 must cause failure.
 				if region.IsRequired {
-					return 0, 0, 0, 0, errors.New("VHDX region table contains unknown required entry")
+					return vhdxRegionPointers{}, fmt.Errorf("%w: %s",
+						errUnknownRequiredRegion, vhdxRegionName(region.TypeIdentifier))
 				}
 			}
 		}
-		return batOffset, batSize, metaOffset, metaSize, nil
-	}
 
-	var batOffset, batSize int64
-	var metaOffset int64
-	var metaSize uint32
+		if err := validateVHDXRegionTable(regions, fileSize); err != nil {
+			return ptrs, err
+		}
 
-	regions, err := rtp.ReadRegionTableAt(types.VHDXFirstRegionTableOffset)
-	if err == nil {
-		// Ignore locateRegions errors from the primary table; the secondary
-		// table will be tried if BAT/metadata offsets are still zero.
-		batOffset, batSize, metaOffset, metaSize, _ = locateRegions(regions)
-	}
-
-	if batOffset == 0 || metaOffset == 0 {
-		regions2, err2 := rtp.ReadRegionTableAt(types.VHDXSecondRegionTableOffset)
-		if err2 == nil {
-			var err3 error
-			batOffset, batSize, metaOffset, metaSize, err3 = locateRegions(regions2)
-			if err3 != nil {
-				return nil, err3
+		for _, region := range regions {
+			switch region.TypeIdentifier {
+			case types.RegionTypeBAT:
+				ptrs.batOffset = region.DataOffset
+				ptrs.batSize = int64(region.DataSize)
+			case types.RegionTypeMetadata:
+				ptrs.metaOffset = region.DataOffset
+				ptrs.metaSize = region.DataSize
 			}
 		}
+		return ptrs, nil
 	}
+
+	ptrs, primaryErr := loadRegions(types.VHDXFirstRegionTableOffset)
+	if errors.Is(primaryErr, errUnknownRequiredRegion) {
+		return nil, primaryErr
+	}
+
+	if primaryErr != nil || ptrs.batOffset == 0 || ptrs.metaOffset == 0 {
+		secondary, secondaryErr := loadRegions(types.VHDXSecondRegionTableOffset)
+		if errors.Is(secondaryErr, errUnknownRequiredRegion) {
+			return nil, secondaryErr
+		}
+		switch {
+		case secondaryErr == nil:
+			ptrs = secondary
+		case primaryErr != nil:
+			return nil, fmt.Errorf("%w: neither VHDX region table could be used: %v; %v",
+				ErrCorruptImage, primaryErr, secondaryErr)
+		}
+	}
+
+	batOffset, batSize, metaOffset, metaSize := ptrs.batOffset, ptrs.batSize, ptrs.metaOffset, ptrs.metaSize
 
 	if batOffset == 0 {
 		return nil, errors.New("VHDX BAT region not found")
@@ -312,6 +368,7 @@ func openVHDX(r io.ReaderAt, fileSize int64, allowDirty bool) (*VirtualDisk, err
 		payload:      childReader,
 		hasLog:       hasLog,
 		replay:       replay,
+		creator:      creator,
 	}
 
 	if metaVals.DiskType == types.DiskTypeDifferential {
@@ -445,6 +502,18 @@ func (d *VirtualDisk) ParentLocators() []types.ParentLocatorEntry {
 // Path returns the filesystem path this disk was opened from, or "" when it was
 // opened from a bare io.ReaderAt.
 func (d *VirtualDisk) Path() string { return d.path }
+
+// FooterSource reports which copy of the VHD footer this disk was opened from.
+//
+// It is FooterSourceTrailing for an intact image and FooterSourceUnknown for a
+// VHDX, which has no footer. Anything else means the conformant footer could not
+// be read and the image was recovered from a fallback copy, which an acquisition
+// record must state rather than presenting the result as an intact read.
+func (d *VirtualDisk) FooterSource() FooterSource { return d.footerSource }
+
+// FooterRecovered reports whether this disk was opened from a fallback footer
+// copy rather than the conformant trailing one, meaning the image is damaged.
+func (d *VirtualDisk) FooterRecovered() bool { return d.footerSource.Recovered() }
 
 // HasLog reports whether this VHDX image's active header carries a log GUID,
 // meaning it holds journalled writes. This is true whether or not the log was
@@ -594,36 +663,9 @@ func (d *VirtualDisk) VirtualToFileOffset(virtualOffset int64) (fileOffset int64
 		case types.BlockStateFullyAllocated:
 			return entry.FileOffset + offsetInBlock, true, nil
 		case types.BlockStatePartiallyAllocated:
-			// For state-7 blocks, sector bitmap determines if this sector is backed.
-			sectorSize := int64(d.sectorSize)
-			chunkRatio := uint64(d.childBATvhdx.ChunkRatio)
-			if chunkRatio == 0 || sectorSize <= 0 {
-				return 0, false, errors.New("invalid VHDX BAT sector mapping")
-			}
-			chunkIndex := uint64(blockIndex) / chunkRatio
-			if int(chunkIndex) >= len(d.childBATvhdx.SectorBitmapOffsets) {
-				return 0, false, nil
-			}
-			bitmapOffset := d.childBATvhdx.SectorBitmapOffsets[chunkIndex]
-			if bitmapOffset < 0 {
-				return 0, false, nil
-			}
-
-			sectorsPerBlock := uint64(d.blockSize) / uint64(d.sectorSize)
-			blockInChunk := uint64(blockIndex) % chunkRatio
-			firstSectorInChunk := blockInChunk * sectorsPerBlock
-			sectorInBlock := uint64(offsetInBlock) / uint64(d.sectorSize)
-			bitPos := firstSectorInChunk + sectorInBlock
-			bytePos := bitPos / 8
-			bitOff := bitPos % 8
-
-			var b [1]byte
-			if _, readErr := d.source.ReadAt(b[:], bitmapOffset+int64(bytePos)); readErr != nil {
-				return 0, false, readErr
-			}
-			allocated := ((b[0] >> bitOff) & 1) == 1
-			if !allocated {
-				return 0, false, nil
+			present, err := d.vhdxSectorPresent(blockIndex, offsetInBlock)
+			if err != nil || !present {
+				return 0, false, err
 			}
 			return entry.FileOffset + offsetInBlock, true, nil
 		default:
@@ -633,6 +675,49 @@ func (d *VirtualDisk) VirtualToFileOffset(virtualOffset int64) (fileOffset int64
 	default:
 		return 0, false, errors.New("unknown disk format")
 	}
+}
+
+// vhdxSectorPresent reports whether the sector covering offsetInBlock of a
+// PARTIALLY_PRESENT block is backed by payload bytes in this file, according to
+// the sector bitmap for the block's chunk.
+//
+// A state-7 block is allocated but only partly written, so treating the whole
+// block as backed claims file offsets for sectors that hold nothing. Both the
+// offset-resolution and the extent-mapping paths need this answer, and when they
+// each had their own copy of the rule only one of them applied it -- extent
+// mapping reported such sectors as mapped while reads correctly served zeroes.
+// Keeping one implementation is what stops the two drifting apart again.
+func (d *VirtualDisk) vhdxSectorPresent(blockIndex uint32, offsetInBlock int64) (bool, error) {
+	if d.childBATvhdx == nil {
+		return false, errors.New("VHDX BAT not available")
+	}
+	if d.sectorSize == 0 || d.blockSize == 0 {
+		return false, errors.New("invalid VHDX BAT sector mapping")
+	}
+	chunkRatio := uint64(d.childBATvhdx.ChunkRatio)
+	if chunkRatio == 0 {
+		return false, errors.New("invalid VHDX BAT sector mapping")
+	}
+
+	chunkIndex := uint64(blockIndex) / chunkRatio
+	if int(chunkIndex) >= len(d.childBATvhdx.SectorBitmapOffsets) {
+		return false, nil
+	}
+	bitmapOffset := d.childBATvhdx.SectorBitmapOffsets[chunkIndex]
+	if bitmapOffset < 0 {
+		return false, nil
+	}
+
+	sectorsPerBlock := uint64(d.blockSize) / uint64(d.sectorSize)
+	blockInChunk := uint64(blockIndex) % chunkRatio
+	sectorInBlock := uint64(offsetInBlock) / uint64(d.sectorSize)
+	bitPos := blockInChunk*sectorsPerBlock + sectorInBlock
+
+	var b [1]byte
+	if _, err := d.source.ReadAt(b[:], bitmapOffset+int64(bitPos/8)); err != nil {
+		return false, err
+	}
+	return ((b[0] >> (bitPos % 8)) & 1) == 1, nil
 }
 
 // Size returns the total virtual disk size in bytes.
@@ -690,4 +775,34 @@ func (d *VirtualDisk) Identifier() [16]byte {
 // GUIDString returns the disk identifier as a formatted GUID string.
 func (d *VirtualDisk) GUIDString() string {
 	return binaryutil.GUIDToString(d.Identifier())
+}
+
+// DataWriteIdentifier returns the VHDX DataWriteGuid from the active image
+// header, which a producer rewrites whenever the disk's contents change. It is
+// the zero GUID for VHD, which has no equivalent field.
+//
+// This is not the disk's stable identity — use Identifier for that. It is the
+// value a VHDX differencing child records in its parent_linkage locator, so a
+// change here means the parent was written to after the child was created.
+func (d *VirtualDisk) DataWriteIdentifier() [16]byte {
+	if d.imgHeader != nil {
+		return d.imgHeader.DataWriteIdentifier
+	}
+	return [16]byte{}
+}
+
+// parentLinkIdentity returns the identifier a differencing child records for
+// this disk when it names it as its parent.
+//
+// The two formats name different GUIDs, and conflating them silently disables
+// the check. A VHD child stores its parent's footer unique id, stable for the
+// life of the image. A VHDX child stores its parent's DataWriteGuid, so the
+// comparison additionally catches a parent modified since the child was built —
+// which is exactly the case where reading the chain would reconstruct a state
+// that never existed.
+func (d *VirtualDisk) parentLinkIdentity() [16]byte {
+	if d.format == types.FileFormatVHDX {
+		return d.DataWriteIdentifier()
+	}
+	return d.Identifier()
 }

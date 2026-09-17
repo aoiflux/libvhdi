@@ -1,0 +1,7 @@
+# Local working notes and outbound feature requests for the sibling filesystem
+# libraries. Deliberately untracked: these are working documents, not part of
+# the library's published surface.
+plans/
+
+# CodeGraph index.
+.codegraph/

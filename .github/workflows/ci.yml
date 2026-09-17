@@ -1,0 +1,227 @@
+# SPDX-License-Identifier: MIT
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The governing constraint of this library, enforced rather than merely
+  # documented: the core module must never acquire a dependency. Consumers who
+  # want only VHD/VHDX parsing must be able to take libvhdi without absorbing
+  # anything else into their module graph.
+  #
+  # This job runs first and gates everything: if the core stops being
+  # zero-dependency, nothing else about the build matters.
+  # ---------------------------------------------------------------------------
+  zero-dependency-guard:
+    name: Zero-dependency guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go.mod declares no requirements
+        run: |
+          set -euo pipefail
+          requires=$(go mod edit -json | jq -r '.Require // [] | length')
+          echo "require count: ${requires}"
+          if [ "${requires}" -ne 0 ]; then
+            echo "::error::The core module has acquired ${requires} dependency/dependencies."
+            echo "Filesystem-aware and table-aware code belongs in a satellite module."
+            go mod edit -json | jq '.Require'
+            exit 1
+          fi
+
+      - name: No go.sum
+        run: |
+          set -euo pipefail
+          if [ -f go.sum ]; then
+            echo "::error::go.sum exists, so the core module has a dependency graph."
+            cat go.sum
+            exit 1
+          fi
+
+      - name: The module graph is this module alone
+        run: |
+          set -euo pipefail
+          modules=$(go list -m all)
+          echo "${modules}"
+          if [ "$(printf '%s\n' "${modules}" | wc -l)" -ne 1 ]; then
+            echo "::error::go list -m all reports more than one module."
+            exit 1
+          fi
+
+      - name: No foreign aoiflux package is reachable from the core
+        run: |
+          set -euo pipefail
+          # Every aoiflux package in the transitive import graph must be one of
+          # our own. A sibling library appearing here is the exact regression
+          # this job exists to catch.
+          foreign=$(go list -deps ./... \
+            | grep '^github.com/aoiflux/' \
+            | grep -v '^github.com/aoiflux/libvhdi\(/\|$\)' \
+            || true)
+          if [ -n "${foreign}" ]; then
+            echo "::error::Foreign aoiflux packages reachable from the core module:"
+            printf '%s\n' "${foreign}"
+            exit 1
+          fi
+          echo "Only libvhdi packages are reachable."
+
+      - name: Only standard-library packages are imported
+        run: |
+          set -euo pipefail
+          # Stronger than the check above and the one that actually states the
+          # promise: outside our own packages, nothing but the standard library.
+          #
+          # A package is external when the FIRST element of its import path
+          # contains a dot, which is how the Go toolchain itself tells a domain
+          # from a standard library path. Testing the whole path is wrong:
+          # crypto/internal/entropy/v1.0.0 is standard library and has a dot.
+          external=$(go list -deps ./... \
+            | grep -v '^github.com/aoiflux/libvhdi\(/\|$\)' \
+            | awk -F/ '$1 ~ /\./' \
+            || true)
+          if [ -n "${external}" ]; then
+            echo "::error::Non-standard-library packages reachable from the core module:"
+            printf '%s\n' "${external}"
+            exit 1
+          fi
+          echo "Standard library only."
+
+  build:
+    name: Build, vet and format
+    runs-on: ubuntu-latest
+    needs: zero-dependency-guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [ -n "${unformatted}" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            printf '%s\n' "${unformatted}"
+            gofmt -d .
+            exit 1
+          fi
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: zero-dependency-guard
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go test ./...
+
+      # The library hands the same *VirtualDisk to concurrent readers, so the
+      # race detector is part of the contract, not an optional extra.
+      - run: go test -race ./...
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    needs: zero-dependency-guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Short runs on every push. These are smoke tests: they re-run the
+      # checked-in seed corpus and explore briefly. Their job is to catch a
+      # parser that has started panicking, not to find new inputs.
+      - name: FuzzOpen
+        run: go test ./reader/ -run '^$' -fuzz FuzzOpen -fuzztime 60s
+
+      - name: FuzzVHDFooter
+        run: go test ./reader/ -run '^$' -fuzz FuzzVHDFooter -fuzztime 60s
+
+      - name: FuzzVHDXStructures
+        run: go test ./reader/ -run '^$' -fuzz FuzzVHDXStructures -fuzztime 60s
+
+      - name: FuzzAnalyze
+        run: go test ./internal/vhdxlog/ -run '^$' -fuzz FuzzAnalyze -fuzztime 60s
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            reader/testdata/fuzz/**
+            internal/vhdxlog/testdata/fuzz/**
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Satellite modules. These are separate modules precisely so that their
+  # dependencies stay out of the core, which also means `go build ./...` at the
+  # repository root does not cover them. Nothing would verify that they still
+  # compile without this job.
+  # ---------------------------------------------------------------------------
+  satellites:
+    name: Satellite module (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    needs: zero-dependency-guard
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - examples/offsets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: Test
+        working-directory: ${{ matrix.module }}
+        run: go test ./...

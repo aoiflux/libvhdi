@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aoiflux/libvhdi/types"
 )
@@ -76,6 +77,15 @@ type ParentSource struct {
 
 	// Name is a human-readable identifier used in diagnostics.
 	Name string
+
+	// ModTime is the parent file's modification time, when the resolver can
+	// supply one. It is optional; the zero value means "not known".
+	//
+	// A differencing child records its parent's modification time, and the
+	// only way to check that record is against the file the resolver actually
+	// found. Resolvers that stat a file should set this so the check can
+	// happen; those that cannot simply leave it zero and the check is skipped.
+	ModTime time.Time
 }
 
 // ParentResolver locates the parent image of a differencing disk.
@@ -205,7 +215,13 @@ func (d *dirResolver) ResolveParent(req ParentRequest) (ParentSource, error) {
 			f.Close()
 			return ParentSource{}, false
 		}
-		return ParentSource{ReaderAt: f, Size: info.Size(), Closer: f, Name: p}, true
+		return ParentSource{
+			ReaderAt: f,
+			Size:     info.Size(),
+			Closer:   f,
+			Name:     p,
+			ModTime:  info.ModTime(),
+		}, true
 	}
 
 	// Absolute paths recorded in the image, in case the chain never moved.
@@ -298,7 +314,13 @@ func (r *fsResolver) ResolveParent(req ParentRequest) (ParentSource, error) {
 				f.Close()
 				continue
 			}
-			return ParentSource{ReaderAt: ra, Size: info.Size(), Closer: f, Name: name}, nil
+			return ParentSource{
+				ReaderAt: ra,
+				Size:     info.Size(),
+				Closer:   f,
+				Name:     name,
+				ModTime:  info.ModTime(),
+			}, nil
 		}
 	}
 

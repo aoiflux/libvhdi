@@ -36,6 +36,30 @@ without an external C dependency.
   than substituting zeroes
 - Hardware-accelerated CRC-32C (Castagnoli via SSE4.2 on x86) for VHDX
 - Bulk BAT reads — single `ReadAt` call for the full allocation table
+- Checkpoint tree discovery (`DiscoverChain`) — the full parent→children graph
+  of a Hyper-V checkpoint directory, read from headers alone
+- Block-level change tracking (`ChangedExtents`) — which byte ranges a
+  checkpoint wrote, including regions it explicitly cleared
+- Sparse streaming (`Stream`) — reads only what is backed, so a 4 TB device
+  holding 8 GB costs 8 GB of reads
+- Versioned JSON reports (`report`) — disk, chain, checkpoint, allocation,
+  integrity and change documents, each schema-versioned and self-describing
+- Structured errors carrying the operation, format, byte offset and field at
+  fault, with `ErrUnsupportedFeature` distinct from `ErrCorruptImage`
+- **Zero dependencies, enforced in CI.** The core module has no `require` line
+  and no `go.sum`, and a CI job fails the build if anything outside the standard
+  library becomes reachable
+
+## Documentation
+
+| Document | Covers |
+| --- | --- |
+| [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) | What is supported, what is not, and what is not a VHD/VHDX concept |
+| [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md) | Deliberate deviations, recovery paths beyond the specification, and the qemu disagreement |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, the zero-dependency constraint, and the three tiers of change tracking |
+| [docs/FORENSICS.md](docs/FORENSICS.md) | What the library guarantees, what to check before trusting a result, and the limitations worth stating in a report |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Upgrading to v0.3.0. Most consumers need no changes |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Install
 
@@ -108,9 +132,10 @@ disk, err := libvhdi.Open(r, &libvhdi.Options{Size: totalBytes})
 
 ### Differencing chains resolve themselves
 
-`OpenFileWith` searches the image's own directory for the parents a differencing
-chain names, verifying each against the identifier and virtual size recorded in
-its child. Opening only the newest disk yields a correct contiguous device:
+`OpenFile`, `OpenFileWith` and `Open` all search the image's own directory for
+the parents a differencing chain names, verifying each against the identifier
+and virtual size recorded in its child. Opening only the newest disk yields a
+correct contiguous device:
 
 ```go
 disk, err := libvhdi.OpenFileWith("snapshot-3.vhdx", nil)
@@ -435,6 +460,63 @@ Filesystem backing file offset: 12582912
 ---
 ```
 
+### 2) Checkpoint trees and differencing chains
+
+```
+go run ./examples/chain [-json] [-recursive] <directory|disk>
+```
+
+Given a directory, scans it and prints the parent→children tree the images form,
+reading headers only. Given a single image, prints the differencing chain behind
+it.
+
+A branched tree is reported as several devices, and the example says plainly
+that which one is current cannot be determined from the disks — that fact lives
+in the machine's `.vmcx` configuration, not in the images.
+
+```
+base.vhd  [VHD, base]
+  +-cp1.avhd  [VHD, checkpoint]
+    +-branch-a.avhd  [VHD, checkpoint]
+    +-branch-b.avhd  [VHD, checkpoint]
+
+this tree has branched into 2 devices:
+  1. branch-a.avhd (complete)
+  2. branch-b.avhd (complete)
+
+  which one is current cannot be determined from the disks.
+```
+
+### 3) JSON reports
+
+```
+go run ./examples/report -kind <disk|chain|allocation|integrity|change> <disk>
+```
+
+Emits a schema-versioned JSON document. `-hash` computes each file's SHA-256,
+`-extents` includes the full extent list, and `-since N` selects the chain index
+a change report measures from.
+
+The integrity report is the one with no equivalent elsewhere: it describes an
+image that **will not open**, saying which of its structures survived.
+
+```
+$ report -kind integrity damaged.vhd
+  footer (trailing)        fail    ... field Cookie at offset 1051136 ...
+  footer (mirror at 0)     pass
+  dynamic disk header      pass
+  full open                pass
+```
+
+That image opened, from its mirror footer, and the document records both the
+recovery and the warning that qualifies it.
+
+### 4) Hex dump from the decoded stream
+
+```
+go run ./examples/readat <disk> <offset> <length>
+```
+
 ## Package Structure
 
 | Package                      | Description                                                   |
@@ -445,9 +527,16 @@ Filesystem backing file offset: 12582912
 | `block`                      | Virtual-to-physical block readers for VHD and VHDX            |
 | `diff`                       | Differencing disk resolver (parent chain read-through)        |
 | `metadata`                   | VHDX metadata table and region table parsing                  |
-| `types`                      | Data structure definitions, constants, GUIDs                  |
+| `report`                     | Versioned JSON report documents                               |
+| `vhdimap`                    | Interfaces a filesystem parser implements for file-level change detection. Declarations only; imports nothing but the standard library |
+| `types`                      | Data structure definitions, constants, GUIDs, error sentinels |
 | `internal/vhdxlog`           | VHDX log parsing and read-only replay overlay                 |
 | `internal/binaryutil`        | Endian-aware parsing utilities, checksums                     |
+| `internal/buildinfo`         | The library's own module version                              |
+
+Filesystem adapters live in the separate `github.com/aoiflux/libvhdi/change`
+module. Not importing it costs nothing: the core module has no dependencies and
+[CI enforces that](.github/workflows/ci.yml).
 
 ## Robustness
 
@@ -555,9 +644,16 @@ go test ./reader/ -run TestCorpus -v
 
 This covers both subformats in both formats, VHDX block sizes from 1 MB to 32 MB,
 CHS-rounded VHD sizes, block-unaligned virtual sizes, all-sparse disks and a
-512 MB disk. All of it decodes byte for byte. See the 0.6.0 changelog entry for
-the results, including the one place where this library and qemu disagree and why
-this library is the conformant one.
+512 MB disk. All of it decodes byte for byte.
+
+**Interop finding.** On the one image where the two implementations disagree,
+this library is the spec-conformant one. For a fixed VHD, qemu-img 11.0.0's
+`vpc` driver reports the virtual size as the *file* length, which includes the
+trailing 512-byte footer; converting such an image to raw therefore yields 512
+extra bytes ending in the `conectix` signature, presented as disk contents. This
+library takes the virtual size from the footer's own size field and clamps reads
+to it, so the footer never enters the data stream. That is the behaviour
+`TestFixedVHD_ReadAtDoesNotLeakFooter` guards.
 
 **Hyper-V, requires elevation.** `scripts/gen-corpus.ps1` drives `New-VHD`, which
 is the only route to a producer-generated *differencing chain* — qemu-img reports

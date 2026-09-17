@@ -12,10 +12,13 @@ import (
 )
 
 func TestOpenVHDX_FallsBackToSecondaryRegionTable(t *testing.T) {
+	// Every region offset is a 1 MB multiple, which MS-VHDX requires and which
+	// the first megabyte -- file identifier, both headers, both region tables --
+	// depends on.
 	const (
-		fileSize   = 2 * 1024 * 1024
-		batOffset  = 512 * 1024
-		metaOffset = 576 * 1024
+		fileSize   = 4 * 1024 * 1024
+		batOffset  = 1 * 1024 * 1024
+		metaOffset = 2 * 1024 * 1024
 	)
 
 	img := make([]byte, fileSize)
@@ -31,10 +34,13 @@ func TestOpenVHDX_FallsBackToSecondaryRegionTable(t *testing.T) {
 	binary.LittleEndian.PutUint64(img[types.VHDXFirstHeaderOffset+8:], 1)
 	finalizeImageHeaderCRC(img, int64(types.VHDXFirstHeaderOffset))
 
-	// Primary region table: valid table with unknown region only (no BAT/metadata).
+	// Primary region table: valid table with an unknown region only (no
+	// BAT/metadata). The entry is deliberately NOT required: an unknown region
+	// marked required must fail the open outright rather than fall back, which
+	// TestOpenVHDX_RejectsUnknownRequiredRegion covers separately.
 	writeRegionTableHeader(img, types.VHDXFirstRegionTableOffset, 1)
 	primaryUnknownGUID := [16]byte{0xaa, 0xbb, 0xcc, 0xdd, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0}
-	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+16, primaryUnknownGUID, 320*1024, 4096, true)
+	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+16, primaryUnknownGUID, 3*1024*1024, 4096, false)
 	finalizeRegionTableCRC(img, types.VHDXFirstRegionTableOffset)
 
 	// Secondary region table: contains BAT + metadata.
@@ -134,4 +140,42 @@ func finalizeImageHeaderCRC(buf []byte, off int64) {
 	header[4], header[5], header[6], header[7] = 0, 0, 0, 0
 	crc := binaryutil.CRC32(header)
 	binary.LittleEndian.PutUint32(header[4:8], crc)
+}
+
+// TestOpenVHDX_RejectsUnknownRequiredRegion pins the specification rule that a
+// region table entry marked required, whose type this library does not
+// recognise, must fail the open.
+//
+// The rule was implemented but unreachable: locateRegions returned the error and
+// the caller discarded it with `_`, so a primary table carrying a required
+// unknown entry alongside valid BAT and metadata entries yielded usable offsets
+// and opened as if the unknown region did not exist. Whatever that region
+// describes would have been silently ignored.
+func TestOpenVHDX_RejectsUnknownRequiredRegion(t *testing.T) {
+	img := buildVHDX(vhdxParams{
+		blockSize:       vhdxDiffBlockSize,
+		sectorSize:      vhdxDiffSectorSize,
+		virtualDiskSize: vhdxDiffVirtual,
+		blockState:      types.BlockStateFullyAllocated,
+		payload:         repeatByte(0xA0, vhdxDiffBlockSize),
+	})
+
+	// Sanity: the unmodified image must open, so a failure below is caused by
+	// the entry added next and not by the fixture.
+	if _, err := OpenVHDX(bytes.NewReader(img), int64(len(img))); err != nil {
+		t.Fatalf("baseline fixture does not open: %v", err)
+	}
+
+	// Add a third, required entry of an unknown type to the primary table,
+	// leaving the valid BAT and metadata entries in place.
+	unknown := [16]byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}
+	writeRegionTableHeader(img, types.VHDXFirstRegionTableOffset, 3)
+	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+16, types.RegionTypeBAT, vhdxBATRegionOff, vhdxBATRegionSize, true)
+	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+48, types.RegionTypeMetadata, vhdxMetaRegionOff, 64*1024, true)
+	writeRegionEntry(img, types.VHDXFirstRegionTableOffset+80, unknown, 320*1024, 4096, true)
+	finalizeRegionTableCRC(img, types.VHDXFirstRegionTableOffset)
+
+	if _, err := OpenVHDX(bytes.NewReader(img), int64(len(img))); err == nil {
+		t.Fatal("opened a VHDX whose primary region table declares an unknown required region")
+	}
 }

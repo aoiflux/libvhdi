@@ -21,17 +21,39 @@ func NewVHDBATParser(r io.ReaderAt) *VHDBATParser {
 	return &VHDBATParser{reader: r}
 }
 
+// vhdSectorBitmapSize returns the size of the per-block sector bitmap that
+// precedes each allocated block of a dynamic or differencing VHD.
+//
+// The bitmap holds one bit per 512-byte sector of the block and is padded out to
+// a whole sector, so it is never smaller than one sector. That floor is not
+// cosmetic: a block smaller than 4096 bytes needs fewer than eight bits, and
+// without the floor the arithmetic yields zero. A zero-sized bitmap places every
+// block's data one sector early -- reading the bitmap as payload -- and leaves a
+// differencing disk with no sector-presence information at all, so every sector
+// would appear to come from the parent.
+func vhdSectorBitmapSize(blockSize uint32) uint32 {
+	const sectorSize = 512
+
+	n := blockSize / (sectorSize * 8)
+	if blockSize%(sectorSize*8) != 0 {
+		n++
+	}
+	if rem := n % sectorSize; rem != 0 {
+		n += sectorSize - rem
+	}
+	if n == 0 {
+		n = sectorSize
+	}
+	return n
+}
+
 // ReadBAT reads the VHD BAT from the specified offset and block count.
 func (p *VHDBATParser) ReadBAT(offset int64, blockCount uint32, blockSize uint32) (*types.VHDBlockAllocationTable, error) {
 	if blockCount == 0 {
 		return nil, errors.New("invalid block count")
 	}
 
-	// Calculate sector bitmap size per block (must be sector-aligned, 512 bytes).
-	sectorBitmapSize := blockSize / (512 * 8)
-	if sectorBitmapSize%512 != 0 {
-		sectorBitmapSize = (sectorBitmapSize/512 + 1) * 512
-	}
+	sectorBitmapSize := vhdSectorBitmapSize(blockSize)
 
 	// Bulk-read all BAT entries in one I/O call.
 	rawBuf := make([]byte, int(blockCount)*4)

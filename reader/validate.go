@@ -5,13 +5,34 @@ package reader
 import (
 	"errors"
 	"fmt"
+	"sort"
 
+	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
 )
 
 // ErrCorruptImage is returned when an image's headers are internally
-// inconsistent or describe structures that do not fit the file.
-var ErrCorruptImage = errors.New("libvhdi: corrupt or malformed image")
+// inconsistent, fail a checksum, or describe structures that do not fit the
+// file.
+//
+// It is the same sentinel the parsers below the reader wrap, so errors.Is
+// answers the question regardless of which layer noticed. A parser that can say
+// where the problem is returns a *types.StructuralError wrapping it.
+var ErrCorruptImage = types.ErrCorruptImage
+
+// ErrUnsupportedFeature is returned when an image is well-formed but uses
+// something this library does not implement, such as a reserved VHD disk type
+// or a VHDX metadata item marked required that this parser does not know.
+//
+// It is deliberately distinct from ErrCorruptImage. One says the file is
+// broken; the other says to try a different tool. Conflating them sends an
+// examiner looking for damage that is not there.
+var ErrUnsupportedFeature = types.ErrUnsupportedFeature
+
+// StructuralError says what was being parsed, where in the image, and what was
+// wrong with it. Errors from the parsers are returned as *StructuralError
+// wherever the location is known.
+type StructuralError = types.StructuralError
 
 // ErrDirtyImage is returned when a VHDX image carries an unreplayed log. Its
 // block allocation table and metadata may be stale, so decoded contents cannot
@@ -28,7 +49,12 @@ var ErrDirtyImage = errors.New("libvhdi: image has an unreplayed log and may be 
 const maxBATBytes = 64 << 20
 
 // validateVHDFixed checks that a fixed disk's payload actually fits its file.
-func validateVHDFixed(footer *types.ParsedFileFooter, fileSize int64) error {
+//
+// footerBytes is the on-disk length of the footer that was actually read, which
+// is 512 for a conformant image and 511 for one written by Virtual PC before the
+// format was documented. Assuming 512 would reject every legacy image, since its
+// payload runs one byte closer to the end of the file.
+func validateVHDFixed(footer *types.ParsedFileFooter, fileSize, footerBytes int64) error {
 	if footer.MediaSize == 0 {
 		return fmt.Errorf("%w: fixed disk has zero media size", ErrCorruptImage)
 	}
@@ -36,8 +62,12 @@ func validateVHDFixed(footer *types.ParsedFileFooter, fileSize int64) error {
 		return fmt.Errorf("%w: fixed disk media size %d overflows", ErrCorruptImage, footer.MediaSize)
 	}
 
+	if footerBytes <= 0 {
+		footerBytes = types.VHDFooterSize
+	}
+
 	// The payload occupies everything before the trailing footer.
-	if need := int64(footer.MediaSize) + types.VHDFooterSize; fileSize > 0 && need > fileSize {
+	if need := int64(footer.MediaSize) + footerBytes; fileSize > 0 && need > fileSize {
 		return fmt.Errorf("%w: fixed disk claims %d payload bytes but the file holds %d",
 			ErrCorruptImage, footer.MediaSize, fileSize)
 	}
@@ -92,9 +122,114 @@ func validateVHDDynamic(footer *types.ParsedFileFooter, h *types.ParsedDynamicDi
 	return nil
 }
 
+// errUnknownRequiredRegion marks the one region-table failure that must never be
+// retried against the other copy. Every other malformation means "this table is
+// damaged, try the spare"; this one means "this image needs a feature we do not
+// have", which the spare says too.
+var errUnknownRequiredRegion = fmt.Errorf(
+	"%w: VHDX region table contains an unknown required entry", ErrCorruptImage)
+
+// vhdxRegionPointers carries the two regions this library locates out of a
+// region table, so reading one table is a single call with a single error.
+type vhdxRegionPointers struct {
+	batOffset  int64
+	batSize    int64
+	metaOffset int64
+	metaSize   uint32
+}
+
+// vhdxRegionAlignment is the alignment MS-VHDX requires of every region's file
+// offset.
+//
+// The first megabyte is reserved for the file identifier, both headers and both
+// region tables, so requiring offsets to be positive multiples of 1 MB also
+// guarantees no region can be placed on top of them. A 512-byte check, which is
+// what this used to be, admits a region starting inside the header area.
+const vhdxRegionAlignment = 1 << 20
+
+// validateVHDXRegionTable checks a whole region table for the structural rules
+// that govern regions as a set, which no per-pointer check can see.
+//
+// Two regions that overlap are the dangerous case. Both would parse, both would
+// return plausible structures, and whichever was read second would be decoding
+// bytes that belong to the other -- so the failure surfaces as wrong data rather
+// than as an error. Unknown region types are included deliberately: this library
+// does not know what such a region contains, but it does know the region
+// occupies that space and that nothing else may.
+func validateVHDXRegionTable(regions []types.ParsedRegionTableEntry, fileSize int64) error {
+	type span struct {
+		name  string
+		start int64
+		end   int64
+	}
+
+	spans := make([]span, 0, len(regions))
+	seen := make(map[[16]byte]bool, len(regions))
+
+	for _, r := range regions {
+		name := vhdxRegionName(r.TypeIdentifier)
+
+		// The specification allows at most one entry per region type. Two would
+		// leave which of them describes the region undefined.
+		if seen[r.TypeIdentifier] {
+			return fmt.Errorf("%w: region table lists the %s region twice", ErrCorruptImage, name)
+		}
+		seen[r.TypeIdentifier] = true
+
+		if r.DataOffset <= 0 || r.DataOffset%vhdxRegionAlignment != 0 {
+			return fmt.Errorf("%w: %s region offset %d is not a positive multiple of 1 MB",
+				ErrCorruptImage, name, r.DataOffset)
+		}
+
+		end := r.DataOffset + int64(r.DataSize)
+		if end < r.DataOffset {
+			return fmt.Errorf("%w: %s region at %d with size %d overflows",
+				ErrCorruptImage, name, r.DataOffset, r.DataSize)
+		}
+		if fileSize > 0 && end > fileSize {
+			return fmt.Errorf("%w: %s region at %d spans %d bytes, past the end of a %d byte file",
+				ErrCorruptImage, name, r.DataOffset, r.DataSize, fileSize)
+		}
+
+		if r.DataSize == 0 {
+			// A zero-length region occupies nothing and so cannot overlap.
+			continue
+		}
+		spans = append(spans, span{name: name, start: r.DataOffset, end: end})
+	}
+
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	for i := 1; i < len(spans); i++ {
+		if spans[i].start < spans[i-1].end {
+			return fmt.Errorf("%w: the %s region at %d overlaps the %s region at %d",
+				ErrCorruptImage, spans[i].name, spans[i].start, spans[i-1].name, spans[i-1].start)
+		}
+	}
+
+	return nil
+}
+
+// vhdxRegionName labels a region for an error message. An unknown GUID is
+// rendered in full, since that is the only thing that identifies it.
+func vhdxRegionName(id [16]byte) string {
+	switch id {
+	case types.RegionTypeBAT:
+		return "BAT"
+	case types.RegionTypeMetadata:
+		return "metadata"
+	default:
+		return "unknown (" + binaryutil.GUIDToString(id) + ")"
+	}
+}
+
 // validateVHDXRegions checks the region table's pointers before anything
 // dereferences them, so a bad offset is reported as a malformed image rather than
 // surfacing as an I/O error from deep inside a parser.
+//
+// This repeats the bounds and alignment checks validateVHDXRegionTable already
+// made, because the two pointers can also reach here having been extracted from
+// the secondary table, and because a caller must not be able to introduce an
+// unchecked offset by reaching openVHDX another way.
 func validateVHDXRegions(batOffset, batRegionSize, metaOffset int64, metaRegionSize uint32, fileSize int64) error {
 	type region struct {
 		name   string
@@ -105,8 +240,8 @@ func validateVHDXRegions(batOffset, batRegionSize, metaOffset int64, metaRegionS
 		{"BAT", batOffset, batRegionSize},
 		{"metadata", metaOffset, int64(metaRegionSize)},
 	} {
-		if r.offset <= 0 || r.offset%512 != 0 {
-			return fmt.Errorf("%w: %s region offset %d is not a positive multiple of 512",
+		if r.offset <= 0 || r.offset%vhdxRegionAlignment != 0 {
+			return fmt.Errorf("%w: %s region offset %d is not a positive multiple of 1 MB",
 				ErrCorruptImage, r.name, r.offset)
 		}
 		if r.size < 0 {
@@ -115,6 +250,13 @@ func validateVHDXRegions(batOffset, batRegionSize, metaOffset int64, metaRegionS
 		if fileSize > 0 && r.offset+r.size > fileSize {
 			return fmt.Errorf("%w: %s region at %d spans %d bytes, past the end of a %d byte file",
 				ErrCorruptImage, r.name, r.offset, r.size, fileSize)
+		}
+	}
+
+	if batRegionSize > 0 && int64(metaRegionSize) > 0 {
+		if batOffset < metaOffset+int64(metaRegionSize) && metaOffset < batOffset+batRegionSize {
+			return fmt.Errorf("%w: the BAT region at %d overlaps the metadata region at %d",
+				ErrCorruptImage, batOffset, metaOffset)
 		}
 	}
 	return nil

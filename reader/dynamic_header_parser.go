@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"time"
 	"unicode/utf16"
 
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
@@ -128,7 +127,7 @@ func (p *VHDDynamicDiskHeaderParser) ReadHeaderAt(offset int64) (*types.ParsedDy
 		BlockSize:        header.BlockSize,
 		NumberOfBlocks:   header.NumberOfBlocks,
 		ParentIdentifier: header.ParentIdentifier,
-		ParentModTime:    time.Unix(int64(header.ParentModificationTime), 0),
+		ParentModTime:    vhdTimestamp(header.ParentModificationTime),
 		ParentFilename:   decodeUTF16BE(header.ParentFilename[:]),
 	}
 
@@ -209,7 +208,7 @@ const (
 	platformCodeWi2r = 0x57693272 // "Wi2r", deprecated
 	platformCodeWi2k = 0x5769326B // "Wi2k", deprecated
 	platformCodeW2ru = 0x57327275 // "W2ru", relative path
-	platformCodeW2ku = 0x5732316B // "W2ku", absolute path
+	platformCodeW2ku = 0x57326B75 // "W2ku", absolute path
 	platformCodeMac  = 0x4D616320 // "Mac "
 	platformCodeMacX = 0x4D616358 // "MacX"
 )
