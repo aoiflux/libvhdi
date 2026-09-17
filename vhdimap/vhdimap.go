@@ -32,6 +32,7 @@ package vhdimap
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 )
 
@@ -43,14 +44,36 @@ import (
 // implementing the optional interface at all.
 var ErrNotSupported = errors.New("vhdimap: not supported by this filesystem")
 
-// ByteRange is a contiguous run of bytes on the volume.
+// ErrIdentityReused is returned by a lookup whose file number is occupied by a
+// different file than the one asked for -- the generation on disk has moved on
+// from the generation in the FileID.
 //
-// Offset is relative to the start of the volume, not to the start of the disk.
-// A volume inside a partition therefore reports offsets that must be shifted by
-// the partition's base before they can be intersected with libvhdi's changed
-// ranges, which are whole-disk absolute. Getting that composition wrong
-// produces a confident wrong answer rather than an error, so an implementation
-// must document which it returns.
+// It is a distinct error rather than "not found" because the two mean opposite
+// things to a change report. Not found says the file is gone; reused says the
+// file is gone and something else now sits in its slot, and treating the second
+// as the first is what produces a report claiming a file was modified when it
+// was deleted and an unrelated file created over it.
+var ErrIdentityReused = errors.New("vhdimap: file identity has been reused")
+
+// ByteRange is a contiguous run of bytes, located on the disk.
+//
+// Offset is measured from the start of the disk, not from the start of the
+// volume. A volume inside a partition must therefore add its own base offset
+// before reporting, so that what comes back can be intersected directly with
+// libvhdi's changed ranges, which are whole-disk absolute.
+//
+// This is the one rule in this package that is not negotiable, because getting
+// it wrong produces a confident wrong answer rather than an error: a
+// volume-relative range compared against a whole-disk one still intersects, and
+// nothing downstream can tell that the answer is nonsense. Every file appears
+// changed, or none does.
+//
+// Requiring one coordinate space rather than documenting two is what removes
+// the mistake. It also matches what a filesystem parser naturally produces: a
+// parser given the whole disk and told where its volume starts reports absolute
+// offsets already, and every one of the six libraries libvhdi/change adapts
+// does exactly that. Capabilities.BaseOffset records the base that was applied,
+// for reporting -- not for the caller to add.
 type ByteRange struct {
 	Offset int64
 	Length int64
@@ -73,6 +96,30 @@ func (r ByteRange) Intersect(other ByteRange) (ByteRange, bool) {
 	}
 	return ByteRange{Offset: start, Length: end - start}, true
 }
+
+// FileExtent is one run of a file's content, located on the disk and placed
+// within the file.
+//
+// Both axes are needed and neither implies the other. The disk range is what
+// intersects with libvhdi's changed ranges to decide whether a file changed at
+// all; the file offset is what turns that answer into "the first megabyte of
+// this file changed" rather than only "this file changed". Every filesystem
+// parser has both to hand, because it derived one from the other.
+//
+// FileOffset is not the sum of the preceding runs' lengths whenever a file has
+// holes: a sparse run occupies file offsets while occupying no disk, so it is
+// reported as its own extent with a zero-length disk range rather than elided.
+// Deriving the position by accumulation would silently shift every offset after
+// the first hole.
+type FileExtent struct {
+	ByteRange
+
+	// FileOffset is where this run begins within the file's own byte space.
+	FileOffset int64
+}
+
+// Sparse reports whether this extent is a hole: file offsets backed by no disk.
+func (e FileExtent) Sparse() bool { return e.Length <= 0 }
 
 // FileID identifies a file within one volume, stably across time.
 //
@@ -185,8 +232,12 @@ type Capabilities struct {
 	HasJournal bool
 
 	// BaseOffset is the volume's offset within the disk the implementation was
-	// given, which a caller needs in order to relate volume-relative ranges to
-	// whole-disk ones.
+	// given.
+	//
+	// It is reported so that a change document can say where the volume it
+	// describes sat, and so that a caller can sanity-check that two states
+	// being compared were opened at the same place. It is not an adjustment to
+	// apply: ByteRange offsets already include it.
 	BaseOffset int64
 }
 
@@ -213,13 +264,20 @@ type Filesystem interface {
 	// FileByID returns one entry by identity.
 	FileByID(ctx context.Context, id FileID) (FileEntry, error)
 
-	// ExtentsForFile returns the volume byte ranges backing a file, sorted by
-	// position within the file.
+	// ExtentsForFile returns the runs backing a file, sorted by position within
+	// the file. Their disk offsets are absolute, in the same coordinate space
+	// as the ranges libvhdi reports -- see ByteRange.
 	//
 	// This is the decisive operation. Intersecting these ranges with the ranges
 	// libvhdi says a checkpoint wrote yields a small candidate set, so a 1 TB
 	// volume is examined in seconds rather than hashed end to end.
-	ExtentsForFile(ctx context.Context, id FileID) ([]ByteRange, error)
+	//
+	// Content stored inside a metadata record rather than in its own blocks --
+	// a resident NTFS attribute, an inline ext inode -- is not reported. Those
+	// bytes live in the MFT or the inode table, which every other record in the
+	// same block shares, so reporting them would attribute one file's change to
+	// all of its neighbours.
+	ExtentsForFile(ctx context.Context, id FileID) ([]FileExtent, error)
 }
 
 // OwnerIndex is an optional interface for a parser that can answer reverse
@@ -282,4 +340,85 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// Coalesce sorts ranges by offset and merges those that overlap or abut.
+//
+// The result is the same set of bytes described in the fewest ranges, which is
+// what makes intersecting two range sets cheap: both sides can then be walked
+// once in step rather than compared pairwise. Zero-length ranges are dropped,
+// since they describe nothing and would otherwise survive as noise in a report.
+//
+// The input is not modified.
+func Coalesce(rs []ByteRange) []ByteRange {
+	if len(rs) == 0 {
+		return nil
+	}
+
+	in := make([]ByteRange, 0, len(rs))
+	for _, r := range rs {
+		if r.Length > 0 {
+			in = append(in, r)
+		}
+	}
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Slice(in, func(i, j int) bool {
+		if in[i].Offset != in[j].Offset {
+			return in[i].Offset < in[j].Offset
+		}
+		return in[i].Length < in[j].Length
+	})
+
+	out := []ByteRange{in[0]}
+	for _, r := range in[1:] {
+		last := &out[len(out)-1]
+		if r.Offset <= last.End() {
+			if end := r.End(); end > last.End() {
+				last.Length = end - last.Offset
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// Intersects reports whether r overlaps any range in the sorted, coalesced set
+// rs, which is what Coalesce returns.
+//
+// It binary-searches, so testing one file's extents against a volume's changed
+// ranges costs a logarithm rather than a scan. That is the difference between
+// examining a million-file volume in seconds and not being able to.
+func Intersects(rs []ByteRange, r ByteRange) bool {
+	if r.Length <= 0 || len(rs) == 0 {
+		return false
+	}
+	// The first range that could overlap is the last one starting at or before
+	// r's end; searching for the first starting past it and stepping back one
+	// finds it.
+	i := sort.Search(len(rs), func(i int) bool { return rs[i].Offset >= r.End() })
+	if i > 0 && rs[i-1].End() > r.Offset {
+		return true
+	}
+	return false
+}
+
+// Overlap returns the parts of r that fall inside the sorted, coalesced set rs.
+//
+// It is Intersects with the answer kept, and it is what lets a report say which
+// bytes of a file changed rather than only that the file did.
+func Overlap(rs []ByteRange, r ByteRange) []ByteRange {
+	if r.Length <= 0 || len(rs) == 0 {
+		return nil
+	}
+	i := sort.Search(len(rs), func(i int) bool { return rs[i].End() > r.Offset })
+	var out []ByteRange
+	for ; i < len(rs) && rs[i].Offset < r.End(); i++ {
+		if got, ok := rs[i].Intersect(r); ok {
+			out = append(out, got)
+		}
+	}
+	return out
 }

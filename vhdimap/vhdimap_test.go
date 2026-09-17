@@ -131,7 +131,7 @@ func TestFileIDZero(t *testing.T) {
 // parser could supply, this type could not exist.
 type fakeFS struct {
 	files   map[vhdimap.FileID]vhdimap.FileEntry
-	extents map[vhdimap.FileID][]vhdimap.ByteRange
+	extents map[vhdimap.FileID][]vhdimap.FileExtent
 }
 
 func (f *fakeFS) Capabilities() vhdimap.Capabilities {
@@ -160,7 +160,7 @@ func (f *fakeFS) FileByID(_ context.Context, id vhdimap.FileID) (vhdimap.FileEnt
 	return e, nil
 }
 
-func (f *fakeFS) ExtentsForFile(_ context.Context, id vhdimap.FileID) ([]vhdimap.ByteRange, error) {
+func (f *fakeFS) ExtentsForFile(_ context.Context, id vhdimap.FileID) ([]vhdimap.FileExtent, error) {
 	return f.extents[id], nil
 }
 
@@ -225,11 +225,14 @@ func TestTheCandidateSetIsTheWholePoint(t *testing.T) {
 			b: {ID: b, Name: "untouched.txt"},
 			c: {ID: c, Name: "fragmented.bin"},
 		},
-		extents: map[vhdimap.FileID][]vhdimap.ByteRange{
-			a: {{Offset: 0, Length: 4096}},
-			b: {{Offset: 1 << 20, Length: 4096}},
+		extents: map[vhdimap.FileID][]vhdimap.FileExtent{
+			a: {{ByteRange: vhdimap.ByteRange{Offset: 0, Length: 4096}}},
+			b: {{ByteRange: vhdimap.ByteRange{Offset: 1 << 20, Length: 4096}}},
 			// A fragmented file where only the second fragment was written.
-			c: {{Offset: 2 << 20, Length: 4096}, {Offset: 8192, Length: 4096}},
+			c: {
+				{ByteRange: vhdimap.ByteRange{Offset: 2 << 20, Length: 4096}},
+				{ByteRange: vhdimap.ByteRange{Offset: 8192, Length: 4096}, FileOffset: 4096},
+			},
 		},
 	}
 

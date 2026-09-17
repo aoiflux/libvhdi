@@ -1,0 +1,14 @@
+github.com/aoiflux/libext v0.3.0 h1:9OKmCcEMEiugYFLZF7YSOZJQaiA4uxw9bO9UIbOLY8M=
+github.com/aoiflux/libext v0.3.0/go.mod h1:3G3wyW96Lxdcyh0jNbMNw8aMF3kPw4aBnEQ7ALwTZs0=
+github.com/aoiflux/libfat v0.3.1 h1:jXKN2QFsRygL10G2d+yekUXRaxMp9XgKbhjvistyMt0=
+github.com/aoiflux/libfat v0.3.1/go.mod h1:5r+eVBMfHeKyk0BadJN9XcEXoN11bXZwz4NaopRThzQ=
+github.com/aoiflux/libhfs v0.3.2 h1:GRacyG8u+5o2TqPIBqvaxSTlXv+OZxZOMfENrOQIfQw=
+github.com/aoiflux/libhfs v0.3.2/go.mod h1:/QcIrxBdw8SO6P6nv5WzddV2LN+S+ro1xyov3ntPqoo=
+github.com/aoiflux/libntfs v0.3.3 h1:rNTUhIGIFi8BTkwJn7jTyVdQnwiiPHw57Q/w+BbW2OI=
+github.com/aoiflux/libntfs v0.3.3/go.mod h1:ZHljeAkUo/Da6I7JIbG2ucmHVR7xjTc+GilchGQFxrw=
+github.com/aoiflux/libtable v0.2.2 h1:SaPHjl5X20Pw1dFUaHvgjpFpfFCzU8ZxUriSb9n4dIo=
+github.com/aoiflux/libtable v0.2.2/go.mod h1:6MlTCv0DnR06SBvi2XZbw1ZslEecNaFbWs8xXwYCVKI=
+github.com/aoiflux/libxfat v1.4.0 h1:4dCAGqECxYVsTShq/PGdqYVknIufwmkJfMLavssEUOo=
+github.com/aoiflux/libxfat v1.4.0/go.mod h1:PD8y1vzc+MxV2ymV2e4TdsyGJNi1aYPpSj60XtT1Iro=
+github.com/aoiflux/libxfs v0.4.1 h1:y/TrH61nESWmZadAVzRWsmdPATfq0jR1WDn7AJws1pU=
+github.com/aoiflux/libxfs v0.4.1/go.mod h1:1h3nGTuRKQyccjCp4dt0VzwOULSgxj+j9XNSivQ4mjQ=

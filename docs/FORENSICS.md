@@ -216,6 +216,38 @@ change for a region the guest cleared.
 Not importing it costs nothing: the core has no filesystem dependency and never
 will.
 
+```go
+doc, err := change.Compare(ctx, disk, 1, nil)   // since the immediate parent
+for _, v := range doc.Volumes {
+    for _, f := range v.Files {
+        fmt.Printf("%-9s %s (%s)\n", f.Change, f.Path, f.Confidence)
+    }
+}
+```
+
+**Read the confidence, not just the verdict.** Three levels ship, and they say
+which evidence was available rather than how good the answer is:
+
+| Confidence | What produced it |
+| --- | --- |
+| `proven` | A journal recorded the event. NTFS's USN journal is the only source, and it is circular, so a rename that has aged out of it drops to the level below |
+| `identified` | The filesystem keeps a real reuse counter — ext's generation, XFS's `di_gen`, NTFS's sequence number — so the file was followed across both states by an identity the filesystem maintains. Not a guess; what is missing is the event |
+| `inferred` | The identity was synthesised because the format records none. FAT, exFAT and HFS+ are here, and on them a reused directory slot reads as a modification and a rearranged directory reads as a delete plus an add |
+
+**A document that reports no files is not a document that found no changes.**
+Check `Tier` first: `block` means no filesystem was read at all, which happens
+when the older image is missing, when the volume holds a format no adapter
+reads, or when `SkipVolumes` was set. The warnings say which.
+
+**The two states must be the same volume.** Comparing two different ones reports
+every file as changed, and nothing in the output would say the comparison was
+meaningless, so it is refused by default with `ErrVolumeMismatch`.
+`AllowVolumeIdentityMismatch` overrides it and leaves a note in the document
+saying so.
+
+**Deletions still need VHDX**, for the reason above: a VHD chain cannot record
+that a region was cleared.
+
 ## Reports
 
 Six document types, each schema-versioned so a consumer can refuse a document it

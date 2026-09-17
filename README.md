@@ -40,6 +40,10 @@ without an external C dependency.
   of a Hyper-V checkpoint directory, read from headers alone
 - Block-level change tracking (`ChangedExtents`) — which byte ranges a
   checkpoint wrote, including regions it explicitly cleared
+- File-level change tracking, in the opt-in `libvhdi/change` module — which
+  *files* a checkpoint added, deleted, modified or renamed, across NTFS, ext,
+  XFS, FAT, exFAT and HFS+, with each finding carrying the confidence its
+  evidence supports
 - Sparse streaming (`Stream`) — reads only what is backed, so a 4 TB device
   holding 8 GB costs 8 GB of reads
 - Versioned JSON reports (`report`) — disk, chain, checkpoint, allocation,
@@ -407,10 +411,16 @@ const (
 
 ## Included Example Programs
 
+Two of these — `offsets` and `changes` — are **separate modules** with their own
+`go.mod`, because they use filesystem libraries and the core module must never
+require one. They therefore do not build from the repository root: `cd` into the
+example's directory first, as the commands below do. Everything else runs from
+the root in the usual way.
+
 ### 1) Partition table and filesystem detection
 
 ```
-go run ./examples/offsets [flags] <disk.vhd|disk.vhdx>
+cd examples/offsets && go run . [flags] <disk.vhd|disk.vhdx>
 ```
 
 Auto-detects partition tables (MBR, GPT) using
@@ -516,6 +526,27 @@ recovery and the warning that qualifies it.
 ```
 go run ./examples/readat <disk> <offset> <length>
 ```
+
+### 5) File-level checkpoint diff
+
+```
+cd examples/changes && go run . [-since N] [-json] [-blocks] <disk.avhdx>
+```
+
+Reports which files a checkpoint wrote, by intersecting the byte ranges libvhdi
+says the newer disks changed with the extent maps of the filesystems on the
+volume. Only the files whose extents fall inside a written range are examined,
+so the cost tracks what changed rather than how large the disk is.
+
+Each finding carries a confidence — `proven` when a journal recorded the event,
+`identified` when the filesystem's own reuse counter carried the file across
+both states, `inferred` when the identity had to be synthesised because the
+format records none. `-blocks` skips the filesystem layer entirely and reports
+the changed byte ranges alone, which is what the core module gives you without
+this module at all.
+
+This example is a separate module: it depends on `libvhdi/change`, which depends
+on six filesystem libraries.
 
 ## Package Structure
 

@@ -92,7 +92,7 @@ is not later mistaken for a defect.
 | Sparse streaming | ✔ | `Stream` reads only what is backed. A 4 TB device holding 8 GB costs 8 GB of reads |
 | Extent map with provenance | ✔ | Each mapped extent names its backing file and chain position |
 | Block-level change tracking | ✔ | `ChangedExtents`, `ChangedSince`, `ChangedBytes` |
-| File-level change tracking | ✘ | Ships in the separate `libvhdi/change` module. Not importing it costs nothing |
+| File-level change tracking | ✔ | Ships in the separate `libvhdi/change` module. Not importing it costs nothing — see Filesystems below |
 | Concurrent reads on one handle | ✔ | Covered by the race detector in CI |
 | Cancellation | ✔ | On every whole-disk operation. `ReadAt` keeps its `io.ReaderAt` signature |
 | JSON reports | ✔ | Six document types, each schema-versioned |
@@ -108,6 +108,58 @@ wants only VHD/VHDX parsing can take libvhdi without absorbing a filesystem
 library into their module graph. The `vhdimap` package declares what a
 filesystem parser must provide; the `libvhdi/change` module implements the
 bridge and is opt-in by importing.
+
+### What the change module reads
+
+`libvhdi/change` adapts six filesystem libraries to the `vhdimap.Filesystem`
+contract. Importing it is what costs you those six dependencies; the core is
+unaffected either way.
+
+| Filesystem | Library | Changes | Renames | Identity |
+| --- | --- | :--: | --- | --- |
+| NTFS | libntfs | ✔ | **proven** — the USN journal records the rename event | MFT record number + sequence number |
+| ext2/3/4 | libext | ✔ | identified | inode + generation |
+| XFS | libxfs | ✔ | identified | inode + di_gen |
+| FAT12/16/32 | libfat | ✔ | inferred | parent cluster + directory slot, synthesised |
+| exFAT | libxfat | ✔ | inferred | parent cluster + entry slot, synthesised |
+| HFS+ / HFSX | libhfs | ✔ | inferred | CNID + creation time, synthesised |
+| ReFS | — | ✘ | — | no Go implementation is known to exist |
+
+The three confidence levels are about which evidence was available, not about
+quality, and every changed file carries its own:
+
+- **proven** — a journal recorded the event happening. NTFS's USN journal is the
+  only source of this. Both states must still carry the journal, and it is
+  circular, so a rename that has aged out of it falls back to the level below.
+- **identified** — the filesystem keeps a real reuse counter, so the file was
+  followed across both states by an identity the filesystem itself maintains. A
+  rename found this way is not a guess. What is missing is the event: the time
+  it happened and any intermediate names are unknown.
+- **inferred** — the identity was synthesised, because the format records none.
+  Two things can then go wrong and neither is detectable from the volume: a
+  record slot reused by a different file reads as a modification, and a file
+  whose parent directory was rearranged reads as a deletion plus an addition.
+
+`ChangedVolume.Notes` states the limit in prose for whichever filesystem
+produced the document, so a reader who did not run the tool is not left to infer
+it from a one-word field.
+
+### What a change report does not claim
+
+- **Deletions need VHDX.** A VHD differencing disk cannot record an explicit
+  zero, so a cleared region reads back as the parent's old contents and there is
+  nothing to detect. See the VHD section above.
+- **Alternate data streams** are attributed to the file that owns them rather
+  than reported individually. NTFS gives a stream no identity of its own, and
+  `vhdimap` is keyed on identity.
+- **Resident and inline content** — a small file living inside its MFT record or
+  its ext inode — contributes no byte ranges. Those bytes sit in the MFT or the
+  inode table, which every neighbouring record shares, so counting them would
+  attribute one file's change to all of its neighbours. Such a file is still
+  reported when it is added, deleted or renamed.
+- **A volume with no counterpart** at the same offset in the older state is not
+  compared, and the document says so. Pairing it with a volume at a different
+  offset would compare two unrelated filesystems.
 
 ReFS is explicitly unsupported and no Go implementation is known to exist.
 Windows Server hosts commonly format VM storage as ReFS, so an examiner may

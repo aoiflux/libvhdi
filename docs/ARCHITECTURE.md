@@ -46,9 +46,19 @@ github.com/aoiflux/libvhdi              go.mod: no requires, ever
 ├── report/                             versioned JSON documents
 └── vhdimap/                            Tier 2: interface declarations only
 
-github.com/aoiflux/libvhdi/change       go.mod: filesystem libraries
+github.com/aoiflux/libvhdi/change       go.mod: libtable + the six FS libraries
+├── diff.go                             the block-guided diff, over vhdimap only
+├── volumes.go                          partition walk and filesystem detection
+├── compare.go                          two disk states -> a report.ChangeReport
+├── internal/readonly/                  a reader that can only be read from
 └── adapters/{ntfs,ext,fat,exfat,hfs,xfs}
 ```
+
+The diff engine imports no adapter. It works over `vhdimap` alone, which is why
+its tests run against an in-memory map rather than needing six filesystem images
+to exist first. `volumes.go` is the only file that names a filesystem library,
+and it is the one a consumer skips if they want the engine over a parser of
+their own.
 
 Two modules, not eight. Per-adapter modules were considered and rejected: the
 filesystem libraries are small, pure Go and zero-dependency, so splitting
@@ -58,7 +68,8 @@ matters — core versus anything-filesystem — is the one that gets a module.
 `examples/offsets` is its own module for the same reason: it uses `libtable` and
 `libext`, and folding it into the root would drag both into the core `go.mod`.
 That means `go build ./...` at the repository root does not cover it, so CI
-builds it separately. The same will apply to `examples/changes`.
+builds it separately. `change` and `examples/changes` are covered the same way,
+by the satellite matrix in `.github/workflows/ci.yml`.
 
 ## Dependency direction
 
@@ -122,6 +133,21 @@ the diff engine could never be tested without an image.
 `libvhdi/change` implements `vhdimap.Filesystem` over the sibling filesystem
 libraries and runs the block-guided diff. Not importing it costs nothing.
 
+Six adapters ship: NTFS, ext, FAT, exFAT, HFS+ and XFS. Two of the six needed
+work on the library side before they could be written at all — HFS+ could not
+convert a block number to a byte offset from outside the package, and XFS
+neither exported its allocation-group-aware conversion nor parsed `di_gen` — so
+the module's shape was decided by what the parsers could actually answer rather
+than by what would have been tidy.
+
+Only NTFS implements `vhdimap.Journal`. ext and XFS both have journals and both
+expose them, but jbd2 and the XFS log record *block writes*, not rename events:
+recovering a rename would mean parsing old directory blocks out of journal
+copies and diffing their entries. That is a real technique and the raw material
+is there, but it reconstructs the rename rather than reading it, and calling the
+result journal-proven would overstate what happened. Renames on those two are
+reported at identity confidence, which is what a real reuse counter supports.
+
 ## Why change detection is block-guided
 
 The naive approach — inventory both volume states and compare — hashes a
@@ -142,13 +168,21 @@ decisive capability a filesystem library must provide.
 
 ### The base-offset hazard
 
-A volume's byte ranges are volume-relative; libvhdi's changed ranges are
-whole-disk absolute. Relating them requires the partition's base offset, and
-getting it wrong produces a confident **wrong answer** rather than an error —
-every file appears changed, or none does, and nothing downstream can tell.
+libvhdi's changed ranges are whole-disk absolute. A filesystem's are whatever
+its parser chose. Relating two coordinate spaces requires the partition's base
+offset, and getting it wrong produces a confident **wrong answer** rather than
+an error — a volume-relative range compared against a whole-disk one still
+intersects, so every file appears changed, or none does, and nothing downstream
+can tell.
 
-This is why `vhdimap.Capabilities` carries `BaseOffset` and why `ByteRange`'s
-documentation states which of the two an implementation returns.
+The fix is to have only one coordinate space. `vhdimap.ByteRange` is defined as
+disk-absolute, so an implementation adds its own base before reporting and the
+diff engine performs no offset arithmetic at all. All six adapted libraries
+already work this way — each has a `BaseOffset` option that is added to every
+offset it reports — so the rule matches the parsers rather than fighting them.
+`Capabilities.BaseOffset` records the base that was applied, for reporting and
+for checking that two compared states were opened at the same place. It is not
+an adjustment for the caller to make.
 
 ## The `report` package
 
@@ -187,9 +221,17 @@ No code path writes to an image. VHDX log replay — the one operation that
 conceptually modifies state — is applied into a read-only in-memory overlay, so
 the file on disk stays byte-identical.
 
-The `change` module will additionally wrap every reader it passes to a
-filesystem library in a shim implementing *only* `io.ReaderAt`, so a library
-that opportunistically type-asserts to `io.WriterAt` cannot find one.
+The `change` module additionally wraps every reader it passes to a filesystem
+library in a shim implementing *only* `io.ReaderAt`, so a library that
+opportunistically type-asserts to `io.WriterAt` cannot find one. The shim is a
+struct with an unexported field rather than an embedded interface: embedding
+would forward whatever else the underlying value implements, which is the exact
+promotion it exists to prevent, and it would do so invisibly.
+
+libntfs is also opened with its own `ReadOnly` option, and the adapter refuses
+the volume if `IsWritable` still reports true afterwards. Two independent
+mechanisms for one guarantee is deliberate — the cost is a line of code and the
+thing being protected is evidence.
 
 ## Conventions
 

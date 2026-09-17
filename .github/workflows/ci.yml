@@ -105,6 +105,24 @@ jobs:
           fi
           echo "Standard library only."
 
+      - name: The core does not import the change module
+        run: |
+          set -euo pipefail
+          # libvhdi/change shares the libvhdi/ prefix, so the foreign-package
+          # check above would not catch it by name. It is a separate module
+          # carrying six filesystem libraries, and the whole point of the split
+          # is that the core never reaches it -- vhdimap is the contract between
+          # them, and the dependency runs one way only.
+          leak=$(go list -deps ./... | grep '^github.com/aoiflux/libvhdi/change' || true)
+          if [ -n "${leak}" ]; then
+            echo "::error::The core module imports the change module:"
+            printf '%s
+' "${leak}"
+            echo "The core declares the vhdimap contract; it must never depend on an implementation of it."
+            exit 1
+          fi
+          echo "The change module is not reachable from the core."
+
   build:
     name: Build, vet and format
     runs-on: ubuntu-latest
@@ -205,7 +223,9 @@ jobs:
       fail-fast: false
       matrix:
         module:
+          - change
           - examples/offsets
+          - examples/changes
     steps:
       - uses: actions/checkout@v4
 
@@ -222,6 +242,22 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go vet ./...
 
+      - name: gofmt
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [ -n "${unformatted}" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            printf '%s
+' "${unformatted}"
+            exit 1
+          fi
+
       - name: Test
         working-directory: ${{ matrix.module }}
         run: go test ./...
+
+      - name: Test with the race detector
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...

@@ -210,7 +210,8 @@ None of these are required.
   of reads rather than 4 TB.
 - **`DiscoverChain`** builds the parent→children tree of a checkpoint directory
   from headers alone.
-- **`ChangedExtents`** says which byte ranges a checkpoint wrote.
+- **`ChangedExtents`** says which byte ranges a checkpoint wrote. For which
+  *files*, add the `libvhdi/change` module; the core stays as it is.
 - **`report`** produces schema-versioned JSON documents.
 - **`GUIDString` / `ParseGUID`**. Both formats store a GUID's first three fields
   little-endian, so printing the bytes in order yields a string that looks like
@@ -225,4 +226,12 @@ into your build, and CI fails the library's own build if that ever stops being
 true.
 
 Filesystem-aware features live in the separate `github.com/aoiflux/libvhdi/change`
-module. Not importing it costs nothing.
+module, which v0.3.0 introduces. It carries six filesystem libraries and
+`libtable`; none of them can reach your build unless you import it, and CI fails
+the library's own build if the core ever does.
+
+If you do want file-level change tracking, add it as its own requirement:
+
+```
+go get github.com/aoiflux/libvhdi/change
+```

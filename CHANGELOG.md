@@ -128,6 +128,27 @@ never be satisfied, plus one silent foot-gun that is better as a loud one.
 
 ### Changed
 
+- **`vhdimap.ByteRange` offsets are disk-absolute, not volume-relative.** The
+  package originally documented them the other way and told implementations to
+  say which they returned. That was the wrong shape: relating two coordinate
+  spaces is the one mistake in this design that produces a confident *wrong
+  answer* rather than an error, because a volume-relative range compared against
+  a whole-disk one still intersects, and every file appears changed or none does.
+
+  Requiring one coordinate space removes the arithmetic instead of documenting
+  it. It also matches the parsers rather than fighting them: all six adapted
+  libraries already have a `BaseOffset` option that is added to every offset they
+  report, so each adapter passes the partition's base and the result needs no
+  adjustment. `Capabilities.BaseOffset` now records the base that *was* applied,
+  for reporting, rather than one the caller is expected to add.
+
+- **`vhdimap.Filesystem.ExtentsForFile` returns `[]FileExtent`, not
+  `[]ByteRange`.** A disk range alone cannot say *where inside a file* a change
+  fell, and deriving the position by accumulating run lengths is wrong for any
+  file with a hole — a sparse run occupies file offsets while occupying no disk,
+  so every offset after the first hole would be shifted. `FileExtent` carries
+  both axes, which every one of the six libraries already had to hand.
+
 - **`Version` is now a function, not a constant.** `Version()` derives the
   module version from `runtime/debug.ReadBuildInfo`. It returns `"(devel)"` when
   libvhdi is the main module and `"unknown"` when no build information is
@@ -337,6 +358,42 @@ never be satisfied, plus one silent foot-gun that is better as a loud one.
 
 - `ModulePath`, the module path `Version()` keys its build-information lookup on.
 
+- **The `github.com/aoiflux/libvhdi/change` module — file-level change
+  tracking.** libvhdi says which byte *ranges* a checkpoint wrote;
+  this module says which *files*. It is a separate module, so importing nothing
+  costs nothing and the core keeps its zero-dependency guarantee.
+
+  Six adapters ship, over the sibling libraries: NTFS (libntfs), ext2/3/4
+  (libext), XFS (libxfs), FAT12/16/32 (libfat), exFAT (libxfat) and HFS+/HFSX
+  (libhfs). `change.Compare` takes a disk and a chain position and returns the
+  same schema-versioned `report.ChangeReport` the core produces, with the file
+  detail filled in.
+
+  The comparison is **block-guided**, not an inventory diff. The changed ranges
+  are intersected with the partition table, then with each file's extent map, so
+  only files that overlap something written are examined. Inventorying both
+  states would mean reading a terabyte to find a megabyte of changes.
+
+  Every finding carries a confidence, and the three levels record which evidence
+  was available rather than how good the answer is. `proven` means a journal
+  recorded the event, which only NTFS's USN journal supplies. `identified` means
+  the filesystem keeps a real reuse counter — ext's generation, XFS's `di_gen`,
+  NTFS's sequence number — so the file was followed by an identity the
+  filesystem itself maintains. `inferred` means the identity had to be
+  synthesised because the format records none, which is FAT, exFAT and HFS+.
+
+  ext and XFS both have journals and both expose them, and neither implements
+  `vhdimap.Journal`. jbd2 and the XFS log record block writes, not rename
+  events: recovering a rename would mean parsing old directory blocks out of
+  journal copies and diffing their entries, which reconstructs the rename rather
+  than reading it. Calling that journal-proven would overstate what happened.
+
+  Every reader handed to a filesystem library is wrapped so that it implements
+  `io.ReaderAt` and nothing else, so a library that opportunistically
+  type-asserts to `io.WriterAt` cannot find one. libntfs is additionally opened
+  with its own `ReadOnly` option and the volume is refused if it still reports
+  itself writable.
+
 ### Removed
 
 Every item here is public surface that could never be satisfied. None of it had
@@ -393,6 +450,22 @@ into the open path rather than deleted.
 - Fuzz seeds for the footer recovery paths. Recovery code runs precisely when
   the conformant structures have already failed, which makes it the easiest part
   of a parser to trick.
+- **A checked-in fuzz corpus**, at `reader/testdata/fuzz/` and
+  `internal/vhdxlog/testdata/fuzz/`: 165 inputs the toolchain identified as
+  expanding coverage, harvested from its own cache. A corpus that lives only in
+  the build cache is discarded on every clean checkout and every CI runner, so
+  each run starts from the hand-written seeds and rediscovers the same paths —
+  and, more importantly, an input that once provoked a crash stops being tested.
+- **The change module's diff engine is tested against an in-memory map**, not
+  against filesystem images. That is the real test of the `vhdimap` design: if
+  only a disk-backed parser could satisfy those interfaces, the classification
+  logic could not be tested without six images existing first. The cases that
+  matter are the ones that are hard to produce on demand on a real volume — a
+  reused file number reported as a modification, a rename with no journal to
+  prove it, a file-relative offset across a hole, two volumes that disagree on
+  their own identity.
+- The read-only shim is tested by handing it a value implementing both
+  `io.ReaderAt` and `io.WriterAt` and asserting the writer cannot be recovered.
 
 ### Documentation
 
@@ -410,7 +483,12 @@ into the open path rather than deleted.
   how it is enforced, the three tiers of change tracking, and the base-offset
   hazard that turns a wrong partition offset into a confident wrong answer.
 - **`docs/FORENSICS.md`** — what the library guarantees, the four checks to make
-  before trusting a result, and the limitations worth stating in a report.
+  before trusting a result, and the limitations worth stating in a report. Now
+  also how to read a change report's confidence levels, and why a document
+  reporting no files is not a document that found no changes.
+- The support matrix gains a per-filesystem table for the change module, naming
+  what each adapter can prove and what it can only infer, plus what a change
+  report deliberately does not claim.
 
 ### Examples
 
@@ -419,6 +497,10 @@ into the open path rather than deleted.
   devices and says plainly that which is current cannot be determined from the
   disks.
 - **`examples/report`** — emits any of the five document kinds.
+- **`examples/changes`** — reports which files a checkpoint wrote, with each
+  finding's confidence. `-blocks` skips the filesystem layer and reports the
+  changed byte ranges alone, which is what the core module gives you without the
+  change module at all. A separate module, like `examples/offsets`.
 - `examples/readat` now computes the SHA-256 it previously only imported the
   package for.
 - `examples/open` uses the exported `GUIDString` instead of a hand-rolled
