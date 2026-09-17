@@ -63,6 +63,7 @@ without an external C dependency.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, the zero-dependency constraint, and the three tiers of change tracking |
 | [docs/FORENSICS.md](docs/FORENSICS.md) | What the library guarantees, what to check before trusting a result, and the limitations worth stating in a report |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Upgrading to v0.3.0. Most consumers need no changes |
+| [docs/RELEASE-NOTES-v0.3.0.md](docs/RELEASE-NOTES-v0.3.0.md) | What changed in the current release, why it matters, and what it does not claim |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Install

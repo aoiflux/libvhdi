@@ -24,7 +24,7 @@ link time, so it reports what was actually compiled in and cannot be wrong.
 
 ## [Unreleased]
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-09-17
 
 Everything since v0.2.0. Breaking, but narrowly: the removals are API that could
 never be satisfied, plus one silent foot-gun that is better as a loud one.
@@ -527,7 +527,7 @@ the data stream, guarded by `TestFixedVHD_ReadAtDoesNotLeakFooter`.
 Initial release. VHD and VHDX parsing, fixed and dynamic disks, checksum
 verification.
 
-[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/aoiflux/libvhdi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aoiflux/libvhdi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aoiflux/libvhdi/releases/tag/v0.1.0
