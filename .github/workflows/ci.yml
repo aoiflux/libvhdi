@@ -22,10 +22,10 @@ jobs:
   # want only VHD/VHDX parsing must be able to take libvhdi without absorbing
   # anything else into their module graph.
   #
-  # This job runs first and gates everything: if the core stops being
+  # This job is deliberately tiny and gates the rest: if the core stops being
   # zero-dependency, nothing else about the build matters.
   # ---------------------------------------------------------------------------
-  zero-dependency-guard:
+  guard:
     name: Zero-dependency guard
     runs-on: ubuntu-latest
     steps:
@@ -36,11 +36,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go.mod declares no requirements
+      - name: The core declares no dependencies
         run: |
           set -euo pipefail
+
           requires=$(go mod edit -json | jq -r '.Require // [] | length')
-          echo "require count: ${requires}"
           if [ "${requires}" -ne 0 ]; then
             echo "::error::The core module has acquired ${requires} dependency/dependencies."
             echo "Filesystem-aware and table-aware code belongs in a satellite module."
@@ -48,85 +48,57 @@ jobs:
             exit 1
           fi
 
-      - name: No go.sum
-        run: |
-          set -euo pipefail
           if [ -f go.sum ]; then
             echo "::error::go.sum exists, so the core module has a dependency graph."
             cat go.sum
             exit 1
           fi
 
-      - name: The module graph is this module alone
-        run: |
-          set -euo pipefail
           modules=$(go list -m all)
-          echo "${modules}"
-          if [ "$(printf '%s\n' "${modules}" | wc -l)" -ne 1 ]; then
-            echo "::error::go list -m all reports more than one module."
+          if [ "$(echo "${modules}" | wc -l)" -ne 1 ]; then
+            echo "::error::go list -m all reports more than one module:"
+            echo "${modules}"
             exit 1
           fi
 
-      - name: No foreign aoiflux package is reachable from the core
-        run: |
-          set -euo pipefail
-          # Every aoiflux package in the transitive import graph must be one of
-          # our own. A sibling library appearing here is the exact regression
-          # this job exists to catch.
-          foreign=$(go list -deps ./... \
-            | grep '^github.com/aoiflux/' \
-            | grep -v '^github.com/aoiflux/libvhdi\(/\|$\)' \
-            || true)
-          if [ -n "${foreign}" ]; then
-            echo "::error::Foreign aoiflux packages reachable from the core module:"
-            printf '%s\n' "${foreign}"
-            exit 1
-          fi
-          echo "Only libvhdi packages are reachable."
+          echo "No requirements, no go.sum, one module in the graph."
 
-      - name: Only standard-library packages are imported
+      - name: Nothing outside the standard library is reachable
         run: |
           set -euo pipefail
-          # Stronger than the check above and the one that actually states the
-          # promise: outside our own packages, nothing but the standard library.
-          #
+          deps=$(go list -deps ./...)
+
           # A package is external when the FIRST element of its import path
           # contains a dot, which is how the Go toolchain itself tells a domain
           # from a standard library path. Testing the whole path is wrong:
           # crypto/internal/entropy/v1.0.0 is standard library and has a dot.
-          external=$(go list -deps ./... \
+          external=$(echo "${deps}" \
             | grep -v '^github.com/aoiflux/libvhdi\(/\|$\)' \
-            | awk -F/ '$1 ~ /\./' \
-            || true)
+            | awk -F/ '$1 ~ /\./' || true)
           if [ -n "${external}" ]; then
             echo "::error::Non-standard-library packages reachable from the core module:"
-            printf '%s\n' "${external}"
+            echo "${external}"
             exit 1
           fi
-          echo "Standard library only."
 
-      - name: The core does not import the change module
-        run: |
-          set -euo pipefail
-          # libvhdi/change shares the libvhdi/ prefix, so the foreign-package
-          # check above would not catch it by name. It is a separate module
-          # carrying six filesystem libraries, and the whole point of the split
-          # is that the core never reaches it -- vhdimap is the contract between
-          # them, and the dependency runs one way only.
-          leak=$(go list -deps ./... | grep '^github.com/aoiflux/libvhdi/change' || true)
+          # libvhdi/change shares the libvhdi/ prefix, so the check above passes
+          # it by name. It is a separate module carrying six filesystem
+          # libraries, and the whole point of the split is that the core never
+          # reaches it: vhdimap is the contract, and it points one way only.
+          leak=$(echo "${deps}" | grep '^github.com/aoiflux/libvhdi/change' || true)
           if [ -n "${leak}" ]; then
             echo "::error::The core module imports the change module:"
-            printf '%s
-' "${leak}"
+            echo "${leak}"
             echo "The core declares the vhdimap contract; it must never depend on an implementation of it."
             exit 1
           fi
-          echo "The change module is not reachable from the core."
+
+          echo "Standard library only, and the change module is out of reach."
 
   build:
     name: Build, vet and format
     runs-on: ubuntu-latest
-    needs: zero-dependency-guard
+    needs: guard
     steps:
       - uses: actions/checkout@v4
 
@@ -139,25 +111,62 @@ jobs:
 
       - run: go vet ./...
 
+      # gofmt walks the directory tree and ignores module boundaries, so this
+      # one invocation covers the satellite modules too. They do not repeat it.
       - name: gofmt
         run: |
           set -euo pipefail
           unformatted=$(gofmt -l .)
           if [ -n "${unformatted}" ]; then
             echo "::error::These files are not gofmt-clean:"
-            printf '%s\n' "${unformatted}"
+            echo "${unformatted}"
             gofmt -d .
+            exit 1
+          fi
+
+      # Two example binaries were committed once, and because `go build`
+      # rewrites them, every build then reported a dirty tree. .gitignore stops
+      # that recurring; this stops it recurring silently.
+      - name: No compiled output is committed
+        run: |
+          set -euo pipefail
+          binaries=$(git ls-files | grep -Ei '[.](exe|dll|so|dylib|test|out)$' || true)
+          if [ -n "${binaries}" ]; then
+            echo "::error::Compiled output is tracked in git:"
+            echo "${binaries}"
+            exit 1
+          fi
+
+          # A catch-all for the extensionless case: `go build` inside an example
+          # directory writes a binary named after that directory. The whole
+          # repository is about 1 MB and its largest file is around 30 KB, so
+          # anything past 256 KB is not source.
+          oversized=$(git ls-files -z | xargs -0 -r du -b 2>/dev/null \
+            | awk '$1 > 262144 { print $1 " bytes  " $2 }' || true)
+          if [ -n "${oversized}" ]; then
+            echo "::error::Tracked files larger than 256 KB, which is probably build output:"
+            echo "${oversized}"
             exit 1
           fi
 
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: zero-dependency-guard
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # The parser decodes Windows path separators in VHD parent locators
+          # and resolves parents against the host filesystem, so the matrix
+          # earns its place. Race behaviour does not vary by OS, so the race
+          # detector runs once rather than three times.
+          - os: ubuntu-latest
+            race: true
+          - os: windows-latest
+            race: false
+          - os: macos-latest
+            race: false
     steps:
       - uses: actions/checkout@v4
 
@@ -166,66 +175,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # This also replays the checked-in fuzz corpus, which is the regression
+      # guard that matters. Exploring for new inputs is a nightly workflow.
       - run: go test ./...
 
       # The library hands the same *VirtualDisk to concurrent readers, so the
       # race detector is part of the contract, not an optional extra.
-      - run: go test -race ./...
-
-  fuzz-smoke:
-    name: Fuzz smoke
-    runs-on: ubuntu-latest
-    needs: zero-dependency-guard
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # Short runs on every push. These are smoke tests: they re-run the
-      # checked-in seed corpus and explore briefly. Their job is to catch a
-      # parser that has started panicking, not to find new inputs.
-      - name: FuzzOpen
-        run: go test ./reader/ -run '^$' -fuzz FuzzOpen -fuzztime 60s
-
-      - name: FuzzVHDFooter
-        run: go test ./reader/ -run '^$' -fuzz FuzzVHDFooter -fuzztime 60s
-
-      - name: FuzzVHDXStructures
-        run: go test ./reader/ -run '^$' -fuzz FuzzVHDXStructures -fuzztime 60s
-
-      - name: FuzzAnalyze
-        run: go test ./internal/vhdxlog/ -run '^$' -fuzz FuzzAnalyze -fuzztime 60s
-
-      - name: Upload failing inputs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-failures
-          path: |
-            reader/testdata/fuzz/**
-            internal/vhdxlog/testdata/fuzz/**
-          if-no-files-found: ignore
+      - name: Test with the race detector
+        if: matrix.race
+        run: go test -race ./...
 
   # ---------------------------------------------------------------------------
-  # Satellite modules. These are separate modules precisely so that their
-  # dependencies stay out of the core, which also means `go build ./...` at the
-  # repository root does not cover them. Nothing would verify that they still
-  # compile without this job.
+  # Satellite modules. They are separate modules precisely so their dependencies
+  # stay out of the core, which also means `go build ./...` at the repository
+  # root does not cover them and nothing else would notice them breaking.
+  #
+  # One job rather than a matrix: three checkouts and three toolchain installs
+  # to compile two small example programs is more ceremony than the work
+  # deserves. gofmt is not repeated here; the build job already covers it.
   # ---------------------------------------------------------------------------
   satellites:
-    name: Satellite module (${{ matrix.module }})
+    name: Satellite modules
     runs-on: ubuntu-latest
-    needs: zero-dependency-guard
-    strategy:
-      fail-fast: false
-      matrix:
-        module:
-          - change
-          - examples/offsets
-          - examples/changes
+    needs: guard
     steps:
       - uses: actions/checkout@v4
 
@@ -234,30 +206,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
-        working-directory: ${{ matrix.module }}
-        run: go build ./...
-
-      - name: Vet
-        working-directory: ${{ matrix.module }}
-        run: go vet ./...
-
-      - name: gofmt
-        working-directory: ${{ matrix.module }}
+      - name: Build and vet each module
         run: |
           set -euo pipefail
-          unformatted=$(gofmt -l .)
-          if [ -n "${unformatted}" ]; then
-            echo "::error::These files are not gofmt-clean:"
-            printf '%s
-' "${unformatted}"
-            exit 1
-          fi
+          for module in change examples/offsets examples/changes; do
+            echo "::group::${module}"
+            (cd "${module}" && go build ./... && go vet ./...)
+            echo "::endgroup::"
+          done
 
-      - name: Test
-        working-directory: ${{ matrix.module }}
-        run: go test ./...
-
-      - name: Test with the race detector
-        working-directory: ${{ matrix.module }}
-        run: go test -race ./...
+      # Only change has tests; the examples are compile-checked above.
+      - name: Test the change module
+        working-directory: change
+        run: |
+          set -euo pipefail
+          go test ./...
+          go test -race ./...

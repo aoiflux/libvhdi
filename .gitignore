@@ -5,3 +5,22 @@ plans/
 
 # CodeGraph index.
 .codegraph/
+
+# Compiled output. Two example binaries were committed once already, and
+# because `go build` rewrites them, every build then dirtied the working tree.
+# A repository of parsers has no reason to carry a 6 MB PE32+ executable.
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# `go build` inside an example directory writes a binary named after that
+# directory, which has no extension on Unix and so escapes the rules above.
+/examples/chain/chain
+/examples/changes/changes
+/examples/offsets/offsets
+/examples/open/open
+/examples/readat/readat
+/examples/report/report

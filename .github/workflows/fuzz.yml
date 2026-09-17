@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: MIT
+
+# Fuzzing is separated from CI on purpose.
+#
+# The checked-in corpus under testdata/fuzz/ is replayed by plain `go test`, so
+# every push already re-runs every input that has ever been interesting. That is
+# the regression guard, and it costs nothing. What this workflow adds is
+# *exploration* for new inputs, which is open-ended by nature: four targets on
+# every push bought several minutes of latency on each commit to rediscover
+# paths the corpus already covers.
+#
+# So exploration runs nightly with a budget worth having, and a real finding is
+# uploaded as an artifact to be committed into the corpus, where the cheap path
+# picks it up forever after.
+
+name: Fuzz
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour, because every other repository on the planet
+    # schedules on the hour and the runner queue shows it.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: How long to run each target
+        required: false
+        default: 5m
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./reader/
+            target: FuzzOpen
+          - package: ./reader/
+            target: FuzzVHDFooter
+          - package: ./reader/
+            target: FuzzVHDXStructures
+          - package: ./internal/vhdxlog/
+            target: FuzzAnalyze
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz ${{ matrix.target }}
+        run: >
+          go test ${{ matrix.package }}
+          -run '^$'
+          -fuzz ${{ matrix.target }}
+          -fuzztime ${{ inputs.fuzztime || '5m' }}
+
+      # A crasher is written next to the seeds. It is the whole point of the
+      # run, so it must survive the runner being destroyed.
+      - name: Upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: |
+            reader/testdata/fuzz/**
+            internal/vhdxlog/testdata/fuzz/**
+          if-no-files-found: ignore
