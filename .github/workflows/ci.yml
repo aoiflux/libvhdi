@@ -15,28 +15,48 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# One job, on one platform, with the checks ordered cheapest-first.
+#
+# A matrix over three operating systems was dropped deliberately. The only
+# OS-dependent code in the library is path normalisation, which case-folds on
+# Windows alone (chainKey in reader/open.go, normalizePath in
+# reader/checkpoint.go) — so Linux and macOS execute identical code and the
+# macOS runner duplicated the Linux one exactly. Windows is covered
+# continuously by development, which happens there.
+#
+# Scheduled fuzzing was also dropped. The checked-in corpus under testdata/fuzz
+# is replayed by plain `go test`, so every push still re-runs every input that
+# has ever been interesting, which is the regression guard. Open-ended
+# exploration produced one failure in six nights and it was a false alarm: the
+# fuzzing coordinator's own -fuzztime deadline surfacing as "context deadline
+# exceeded" in a target that takes no context at all. Run it by hand when
+# touching a parser:
+#
+#   go test ./reader/ -run '^$' -fuzz FuzzOpen -fuzztime 5m
 jobs:
-  # ---------------------------------------------------------------------------
-  # The governing constraint of this library, enforced rather than merely
-  # documented: the core module must never acquire a dependency. Consumers who
-  # want only VHD/VHDX parsing must be able to take libvhdi without absorbing
-  # anything else into their module graph.
-  #
-  # This job is deliberately tiny and gates the rest: if the core stops being
-  # zero-dependency, nothing else about the build matters.
-  # ---------------------------------------------------------------------------
-  guard:
-    name: Zero-dependency guard
+  ci:
+    name: Guard, build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # The core module has no go.sum by design, so the default **/go.sum
+          # lookup logged a cache warning on every run. change/go.sum is the
+          # only dependency file in the repository.
+          cache-dependency-path: change/go.sum
 
-      - name: The core declares no dependencies
+      # -----------------------------------------------------------------------
+      # The governing constraint of this library, enforced rather than merely
+      # documented: the core module must never acquire a dependency. Consumers
+      # who want only VHD/VHDX parsing must be able to take libvhdi without
+      # absorbing anything else into their module graph.
+      #
+      # First, because if this fails nothing else about the build matters.
+      # -----------------------------------------------------------------------
+      - name: Zero-dependency guard
         run: |
           set -euo pipefail
 
@@ -61,11 +81,6 @@ jobs:
             exit 1
           fi
 
-          echo "No requirements, no go.sum, one module in the graph."
-
-      - name: Nothing outside the standard library is reachable
-        run: |
-          set -euo pipefail
           deps=$(go list -deps ./...)
 
           # A package is external when the FIRST element of its import path
@@ -93,26 +108,16 @@ jobs:
             exit 1
           fi
 
-          echo "Standard library only, and the change module is out of reach."
+          echo "No requirements, no go.sum, one module, standard library only."
 
-  build:
-    name: Build, vet and format
-    runs-on: ubuntu-latest
-    needs: guard
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - run: go build ./...
-
-      - run: go vet ./...
+      - name: Build and vet
+        run: |
+          set -euo pipefail
+          go build ./...
+          go vet ./...
 
       # gofmt walks the directory tree and ignores module boundaries, so this
-      # one invocation covers the satellite modules too. They do not repeat it.
+      # one invocation covers the satellite modules too.
       - name: gofmt
         run: |
           set -euo pipefail
@@ -125,8 +130,7 @@ jobs:
           fi
 
       # Two example binaries were committed once, and because `go build`
-      # rewrites them, every build then reported a dirty tree. .gitignore stops
-      # that recurring; this stops it recurring silently.
+      # rewrites them, every build then reported a dirty tree.
       - name: No compiled output is committed
         run: |
           set -euo pipefail
@@ -149,64 +153,21 @@ jobs:
             exit 1
           fi
 
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    needs: guard
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The parser decodes Windows path separators in VHD parent locators
-          # and resolves parents against the host filesystem, so the matrix
-          # earns its place. Race behaviour does not vary by OS, so the race
-          # detector runs once rather than three times.
-          - os: ubuntu-latest
-            race: true
-          - os: windows-latest
-            race: false
-          - os: macos-latest
-            race: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # This also replays the checked-in fuzz corpus, which is the regression
-      # guard that matters. Exploring for new inputs is a nightly workflow.
-      - run: go test ./...
+      # This also replays the checked-in fuzz corpus.
+      - name: Test
+        run: go test ./...
 
       # The library hands the same *VirtualDisk to concurrent readers, so the
-      # race detector is part of the contract, not an optional extra.
+      # race detector is part of the contract, not an optional extra. It runs
+      # after the plain suite so a failure here means a race rather than a bug.
       - name: Test with the race detector
-        if: matrix.race
         run: go test -race ./...
 
-  # ---------------------------------------------------------------------------
-  # Satellite modules. They are separate modules precisely so their dependencies
-  # stay out of the core, which also means `go build ./...` at the repository
-  # root does not cover them and nothing else would notice them breaking.
-  #
-  # One job rather than a matrix: three checkouts and three toolchain installs
-  # to compile two small example programs is more ceremony than the work
-  # deserves. gofmt is not repeated here; the build job already covers it.
-  # ---------------------------------------------------------------------------
-  satellites:
-    name: Satellite modules
-    runs-on: ubuntu-latest
-    needs: guard
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build and vet each module
+      # Satellite modules have their own go.mod precisely so their dependencies
+      # stay out of the core, which also means `go build ./...` at the root does
+      # not cover them and nothing else would notice them breaking. gofmt is not
+      # repeated; the invocation above already covered them.
+      - name: Satellite modules
         run: |
           set -euo pipefail
           for module in change examples/offsets examples/changes; do
@@ -214,11 +175,7 @@ jobs:
             (cd "${module}" && go build ./... && go vet ./...)
             echo "::endgroup::"
           done
-
-      # Only change has tests; the examples are compile-checked above.
-      - name: Test the change module
-        working-directory: change
-        run: |
-          set -euo pipefail
+          # Only change has tests; the examples are compile-checked above.
+          cd change
           go test ./...
           go test -race ./...
