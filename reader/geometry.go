@@ -135,7 +135,8 @@ type Provenance struct {
 	// is the only record that the expansion happened. VHD only.
 	OriginalSize uint64
 
-	// Features is the VHD footer's feature flag word.
+	// Features is the VHD footer's feature flag word: types.FeatureTemporary
+	// (0x1) and types.FeatureReserved (0x2), which is always set. VHD only.
 	Features uint32
 
 	// SavedState marks a VHD saved from a running machine. Its filesystem is a

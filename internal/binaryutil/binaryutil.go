@@ -268,7 +268,7 @@ func CRC32WithInitial(data []byte, initial uint32) uint32 {
 	return crc32.Update(initial^0xFFFFFFFF, castagnoliTable, data) ^ 0xFFFFFFFF
 }
 
-// VerifyCRC32 verifies data against a stored CRC-32 checksum.
+// VerifyCRC32 verifies data against a stored CRC-32C checksum.
 func VerifyCRC32(data []byte, storedChecksum uint32) bool {
 	computed := CRC32(data)
 	return computed == storedChecksum

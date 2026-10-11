@@ -52,7 +52,7 @@ const ModulePath = buildinfo.ModulePath
 const Author = "aoiflux"
 
 // Version reports the libvhdi module version recorded in the calling binary's
-// build information, for example "v0.3.0".
+// build information, for example "v0.4.0".
 //
 // The value is read from the metadata the Go toolchain embeds at link time
 // rather than from a constant maintained by hand, so it cannot drift away from

@@ -1,7 +1,7 @@
 # Support matrix
 
 What libvhdi reads, what it does not, and what is not a VHD/VHDX concept at all.
-Current as of v0.3.0.
+Current as of v0.4.0.
 
 Three symbols are used throughout: **✔** supported, **~** partial (with the
 limit named), **✘** not supported, **–** not applicable to the format.

@@ -141,7 +141,7 @@ silently skipped.
 ## Checks the specification requires and libvhdi enforces
 
 - VHD footer and dynamic header checksums, using the specification's
-  one's-complement algorithm. **Not** CRC-32; that is a VHDX construct, and
+  one's-complement algorithm. **Not** CRC-32C; that is a VHDX construct, and
   `TestVHDSpecChecksumIsNotCRC32C` exists so the distinction is not tested
   tautologically.
 - VHD format version must be `0x00010000`.

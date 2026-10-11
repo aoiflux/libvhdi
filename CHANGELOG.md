@@ -24,6 +24,8 @@ link time, so it reports what was actually compiled in and cannot be wrong.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
 Pure VHD footer codecs for tools and tests that produce footers of their own,
 and a fix to which footer field gives a VHD its size. Breaking, narrowly: two
 `types.FileFooter` fields and one `types.ParsedFileFooter` field are renamed to
@@ -613,7 +615,8 @@ the data stream, guarded by `TestFixedVHD_ReadAtDoesNotLeakFooter`.
 Initial release. VHD and VHDX parsing, fixed and dynamic disks, checksum
 verification.
 
-[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/aoiflux/libvhdi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aoiflux/libvhdi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aoiflux/libvhdi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aoiflux/libvhdi/releases/tag/v0.1.0
