@@ -24,6 +24,92 @@ link time, so it reports what was actually compiled in and cannot be wrong.
 
 ## [Unreleased]
 
+Pure VHD footer codecs for tools and tests that produce footers of their own,
+and a fix to which footer field gives a VHD its size. Breaking, narrowly: two
+`types.FileFooter` fields and one `types.ParsedFileFooter` field are renamed to
+the names the specification gives them. See [docs/MIGRATION.md](docs/MIGRATION.md).
+
+### Breaking
+
+- **`types.FileFooter.DiskSize` and `DataSize` are now `OriginalSize` and
+  `CurrentSize`**, and **`types.ParsedFileFooter.DataSize` is now
+  `OriginalSize`**. The old names described the fields the wrong way round, and
+  they were read the wrong way round too (see Fixed). A rename makes code that
+  set or read them fail to compile instead of silently keeping the old meaning.
+
+### Fixed
+
+- **A VHD expanded after creation reported its old size.** The footer records
+  Original Size at offset 40 and Current Size at offset 48. libvhdi read offset
+  40 as the virtual size and reported offset 48 as `Provenance().OriginalSize`.
+  On an image grown with `Resize-VHD`, `Size()` therefore reported the size at
+  creation, and reads stopped there, so everything past the old end was out of
+  reach. The test fixture wrote the same swapped layout, so the suite passed.
+  Images straight from New-VHD record equal sizes, so the real-image corpus did
+  not catch it either. `MediaSize`, `Size()` and `Geometry().VirtualSize` now
+  come from Current Size, and `Provenance().OriginalSize` from Original Size. A
+  new test writes the two fields by offset, independently of the fixture.
+- **Documentation of three footer fields.** `ModificationTime` and
+  `ParentModificationTime` were documented as Unix timestamps; they count
+  seconds from 2000-01-01T00:00:00Z, which is how the library has decoded them
+  since v0.3.0. `FileFooter.Checksum` and `DynamicDiskHeader.Checksum` were
+  documented as CRC-32; they are the specification's one's-complement byte sum.
+  The VHDX header and region-table checksums now say CRC-32C rather than CRC-32.
+  `ParsedFileFooter.Features` described the flags as bit 1 temporary, bit 0
+  reserved and bit 31 always set; the specification defines 0x00000001 as
+  Temporary and 0x00000002 as Reserved, which must always be set.
+
+### Added
+
+- **Pure VHD footer codecs in `types`.** They read and write byte slices and
+  values, never files; libvhdi still writes no image. They are the code the
+  reader itself verifies with, exported so that a producer computes a footer
+  exactly the way libvhdi checks it:
+  - `Checksum(b []byte) uint32`: the one's-complement byte sum.
+  - `FooterChecksum(f *FileFooter) uint32`: the checksum `f` should carry, with
+    its Checksum field taken as zero.
+  - `(*FileFooter).MarshalBinary() ([]byte, error)`: the 512-byte big-endian
+    structure, every field at its specified offset.
+  - `Epoch`, `Time(uint32) time.Time` and `Timestamp(time.Time) uint32`: the
+    2000-based timestamp. `Time(0)` is the zero Time, meaning "none recorded".
+    `Timestamp` clamps out-of-range times to 0 and 0xFFFFFFFF rather than
+    wrapping them.
+  - `CHSGeometry(totalSectors uint64)`: a direct port of the specification
+    appendix's "CHS Calculation".
+  - `PackGeometry` and `UnpackGeometry`: the footer's Disk Geometry field.
+- **Footer field constants in `types`**, typed to match the `FileFooter` fields:
+  `FormatVersion1`, `FeatureTemporary`, `FeatureReserved`, `FixedDataOffset`
+  and `CreatorOSWindows` ("Wi2k").
+
+### Changed
+
+- **The go directive is `go 1.25`, down from `go 1.26.2`.** The core module uses
+  nothing newer, which `go vet`'s `stdversion` check confirms. A module that
+  requires libvhdi no longer has its own go line raised to 1.26.2. The
+  satellite modules (`change`, `examples/offsets` and `examples/changes`) are at
+  `go 1.25.5`, the lowest version their dependencies allow.
+- The reader now uses the exported codecs internally, so there is one
+  implementation of each. `internal/binaryutil.VHDChecksum` is gone; it was
+  internal.
+
+### Tests
+
+- The codecs are tested against the specification rather than against
+  themselves. Each footer field is checked at its specified offset. The checksum
+  is checked against an independently written byte sum. `Timestamp` and `Time`
+  round-trip every year from 2000 to 2136, including both ends of the range.
+  `CHSGeometry` is checked at each branch boundary of the appendix algorithm,
+  with expected values derived by hand, at 512 MiB, 1 GiB and 127 GiB, and in a
+  100,000-size sweep that confirms no geometry describes more sectors than the
+  disk holds.
+- A footer built with the codecs passes the parser's checksum check, and fails
+  it with any single byte flipped. It round-trips through the parser to an
+  identical struct, and the fixture's footer round-trips to identical bytes. A
+  fixed VHD built from the codecs alone opens with `OpenVHD`.
+- `TestCorpusVHDFootersMatchTheCodecs` holds the codecs to Hyper-V's own
+  footers: for every `.vhd` in `LIBVHDI_CORPUS`, the geometry, checksum and
+  bytes must match exactly.
+
 ## [0.3.0] - 2026-09-17
 
 Everything since v0.2.0. Breaking, but narrowly: the removals are API that could

@@ -21,10 +21,10 @@ limit named), **✘** not supported, **–** not applicable to the format.
 | Parent locators `W2ru` / `W2ku` | ✔ | Both platform codes decode. `W2ku` was undecodable before v0.3.0 |
 | Parent GUID verification | ✔ | |
 | Parent timestamp comparison | ✔ | Reported as a warning, never an error — filesystem timestamps do not survive a copy |
-| CHS geometry | ✔ | Exposed through `Geometry()`. `HasCHS()` distinguishes a recorded zero geometry from a format that has no such field |
+| CHS geometry | ✔ | Exposed through `Geometry()`. `HasCHS()` distinguishes a recorded zero geometry from a format that has no such field. `types.CHSGeometry` computes it from a size, per the specification's appendix |
 | Creator application, version, host OS | ✔ | Through `Provenance()` |
 | Saved-state flag | ✔ | Marks an image whose filesystem is crash-consistent rather than cleanly unmounted |
-| Original vs current size | ✔ | Their difference is the only record that a disk was expanded |
+| Original vs current size | ✔ | Original Size at footer offset 40, Current Size at 48; the current size is the virtual size. Their difference is the only record that a disk was expanded. Read the wrong way round before v0.4.0 |
 | Timestamps | ✔ | Decoded against the VHD epoch (1 January 2000), not the Unix epoch |
 | Explicit zero on a differencing disk | ✘ | **A format limitation, not a library one.** See below |
 | 4096-byte logical sectors | – | VHD is defined on 512-byte sectors throughout |

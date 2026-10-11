@@ -1,3 +1,69 @@
+# Migrating to v0.4.0
+
+v0.4.0 adds pure VHD footer codecs to `types` and fixes which footer field
+gives a VHD its size. **Consumers of the root `libvhdi` API need no code
+changes.** Only code that touches `types.FileFooter` or
+`types.ParsedFileFooter` directly has to change.
+
+## Renamed fields
+
+| Before | After | Footer offset |
+| --- | --- | --- |
+| `types.FileFooter.DiskSize` | `types.FileFooter.OriginalSize` | 40 |
+| `types.FileFooter.DataSize` | `types.FileFooter.CurrentSize` | 48 |
+| `types.ParsedFileFooter.DataSize` | `types.ParsedFileFooter.OriginalSize` | 40 |
+
+The footer stores Original Size (the size at creation) at offset 40 and Current
+Size at offset 48. The old field names had the two the wrong way round, and so
+did the reader. The names were changed, not just the comments, so code that
+relied on the old meaning fails to compile rather than going on with it.
+
+`ParsedFileFooter.MediaSize` keeps its name and is still the virtual size. It
+now comes from Current Size.
+
+## Behaviour change: expanded VHDs report their current size
+
+On a VHD grown after creation (for example with `Resize-VHD`), `Size()`,
+`Geometry().VirtualSize` and `ParsedFileFooter.MediaSize` used to report the
+size at creation, and reads stopped there. They now report the current size,
+and the whole disk is readable. `Provenance().OriginalSize` now reports the
+size at creation, as documented; before, it reported the current size.
+
+On every other VHD, the two sizes are equal and nothing changes. New-VHD
+writes equal sizes, and so does almost every other producer.
+
+## New: footer codecs
+
+`types` now exports `Checksum`, `FooterChecksum`, `(*FileFooter).MarshalBinary`,
+`Epoch`, `Time`, `Timestamp`, `CHSGeometry`, `PackGeometry` and `UnpackGeometry`,
+plus the constants `FormatVersion1`, `FeatureTemporary`, `FeatureReserved`,
+`FixedDataOffset` and `CreatorOSWindows`. They are pure: they encode values into
+bytes and back, and libvhdi still never writes an image. A tool that writes a
+fixed VHD can build its footer with them, and check its output by opening it
+with `OpenVHD`:
+
+```go
+f := types.FileFooter{
+    Features:         types.FeatureReserved,
+    FormatVersion:    types.FormatVersion1,
+    NextOffset:       types.FixedDataOffset,
+    ModificationTime: types.Timestamp(time.Now()),
+    CreatorOS:        types.CreatorOSWindows,
+    OriginalSize:     size,
+    CurrentSize:      size,
+    DiskGeometry:     types.PackGeometry(types.CHSGeometry(size / 512)),
+    DiskType:         uint32(types.DiskTypeFixed),
+}
+copy(f.Signature[:], types.VHDFooterSignature)
+f.Checksum = types.FooterChecksum(&f)
+footer, _ := f.MarshalBinary()
+```
+
+## Go version
+
+The go directive dropped from `go 1.26.2` to `go 1.25`, so requiring libvhdi no
+longer raises your module's go line past 1.25.
+
 # Migrating to v0.3.0
 
 v0.3.0 is the first release after v0.2.0 and it is breaking, but narrowly. The

@@ -1,6 +1,6 @@
 module github.com/aoiflux/libvhdi/examples/changes
 
-go 1.26.2
+go 1.25.5
 
 require (
 	github.com/aoiflux/libvhdi v0.0.0

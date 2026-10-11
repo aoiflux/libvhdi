@@ -210,7 +210,7 @@ func (d *VirtualDisk) Provenance() Provenance {
 		p.CreatorVersion = d.footer.CreatorVersion
 		p.CreatorOS = trimCreatorCode(d.footer.CreatorOS)
 		p.Created = d.footer.ModTime
-		p.OriginalSize = d.footer.DataSize
+		p.OriginalSize = d.footer.OriginalSize
 		p.Features = d.footer.Features
 		p.SavedState = d.footer.SavedState
 	}

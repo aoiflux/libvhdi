@@ -71,16 +71,18 @@ func writeVHDFooter(dst []byte, p vhdFooterParams) {
 	binary.BigEndian.PutUint32(f[8:12], 0x00000002) // features: reserved bit
 	binary.BigEndian.PutUint32(f[12:16], 0x00010000)
 	binary.BigEndian.PutUint64(f[16:24], p.nextOffset)
-	binary.BigEndian.PutUint32(f[24:28], vhdTimestampRaw(p.createdAt))
+	binary.BigEndian.PutUint32(f[24:28], types.Timestamp(p.createdAt))
 	binary.BigEndian.PutUint32(f[28:32], 0x6C696276) // creator app "libv"
 	binary.BigEndian.PutUint32(f[32:36], 0x00010000) // creator version
 	binary.BigEndian.PutUint32(f[36:40], 0x5769326B) // creator OS "Wi2k"
-	binary.BigEndian.PutUint64(f[40:48], p.mediaSize)
+	// Original Size at offset 40, then Current Size at offset 48. The current
+	// size is the virtual size; the original records what it was at creation.
 	dataSize := p.dataSize
 	if dataSize == 0 {
 		dataSize = p.mediaSize
 	}
-	binary.BigEndian.PutUint64(f[48:56], dataSize)
+	binary.BigEndian.PutUint64(f[40:48], dataSize)
+	binary.BigEndian.PutUint64(f[48:56], p.mediaSize)
 	geometry := uint32(p.cylinders)<<16 | uint32(p.heads)<<8 | uint32(p.sectorsPerTrack)
 	binary.BigEndian.PutUint32(f[56:60], geometry)
 	binary.BigEndian.PutUint32(f[60:64], uint32(p.diskType))
@@ -122,7 +124,7 @@ func writeVHDDynHeader(dst []byte, p vhdDynHeaderParams) {
 	binary.BigEndian.PutUint32(h[32:36], p.blockSize)
 	binary.BigEndian.PutUint32(h[36:40], 0) // checksum placeholder
 	copy(h[40:56], p.parentIdentifier[:])
-	binary.BigEndian.PutUint32(h[56:60], vhdTimestampRaw(p.parentModTime))
+	binary.BigEndian.PutUint32(h[56:60], types.Timestamp(p.parentModTime))
 	// h[60:64] reserved1
 
 	// Parent filename: 512 bytes of UTF-16 big-endian at offset 64.

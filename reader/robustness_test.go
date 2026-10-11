@@ -132,7 +132,7 @@ func TestVHDBATOffsetBeyondEOFIsRejected(t *testing.T) {
 func TestVHDMediaSizeBeyondFileIsRejectedForFixed(t *testing.T) {
 	img := buildFixedVHD(4096, nil)
 	patchVHDFooter(img, func(f []byte) {
-		binary.BigEndian.PutUint64(f[40:48], 1<<40)
+		binary.BigEndian.PutUint64(f[48:56], 1<<40) // Current Size
 	})
 
 	if _, err := OpenVHD(bytes.NewReader(img), int64(len(img))); err == nil {

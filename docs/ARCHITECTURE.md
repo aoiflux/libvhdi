@@ -34,7 +34,7 @@ wrong: `crypto/internal/entropy/v1.0.0` is standard library and contains a dot.
 ```
 github.com/aoiflux/libvhdi              go.mod: no requires, ever
 ├── vhdi.go                             root re-exports; the API most callers use
-├── types/                              on-disk structures, enums, error sentinels
+├── types/                              on-disk structures, enums, error sentinels, pure VHD footer codecs
 ├── internal/binaryutil/                endian reads, checksums, GUID formatting
 ├── internal/vhdxlog/                   VHDX log replay
 ├── internal/buildinfo/                 the library's own version

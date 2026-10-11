@@ -1,6 +1,6 @@
 module github.com/aoiflux/libvhdi/examples/offsets
 
-go 1.26.2
+go 1.25.5
 
 require (
 	github.com/aoiflux/libtable v0.1.1

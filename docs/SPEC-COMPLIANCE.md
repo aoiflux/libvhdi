@@ -145,6 +145,11 @@ silently skipped.
   `TestVHDSpecChecksumIsNotCRC32C` exists so the distinction is not tested
   tautologically.
 - VHD format version must be `0x00010000`.
+- VHD footer sizes by offset: Original Size at 40, Current Size at 48. The
+  virtual size is Current Size; an expanded disk records a smaller Original
+  Size, and reading the two the other way round truncates it.
+- VHD CHS geometry, where `types.CHSGeometry` computes it, follows the
+  appendix's "CHS Calculation" exactly, including the 65535 × 16 × 255 cap.
 - VHD `Data Offset` must be `0xFFFFFFFFFFFFFFFF` on a fixed disk.
 - VHDX CRC-32C over all 4096 bytes of each header, with the checksum field
   zeroed.

@@ -127,7 +127,7 @@ func (p *VHDDynamicDiskHeaderParser) ReadHeaderAt(offset int64) (*types.ParsedDy
 		BlockSize:        header.BlockSize,
 		NumberOfBlocks:   header.NumberOfBlocks,
 		ParentIdentifier: header.ParentIdentifier,
-		ParentModTime:    vhdTimestamp(header.ParentModificationTime),
+		ParentModTime:    types.Time(header.ParentModificationTime),
 		ParentFilename:   decodeUTF16BE(header.ParentFilename[:]),
 	}
 
@@ -138,7 +138,7 @@ func (p *VHDDynamicDiskHeaderParser) ReadHeaderAt(offset int64) (*types.ParsedDy
 	}
 
 	// Validate format version (must be 0x00010000 = v1.0).
-	if header.FormatVersion != 0x00010000 {
+	if header.FormatVersion != types.FormatVersion1 {
 		return nil, errors.New("unsupported VHD dynamic disk header format version")
 	}
 
@@ -282,7 +282,7 @@ func (p *VHDDynamicDiskHeaderParser) VerifyHeaderChecksum(header *types.DynamicD
 	// Serialize header to bytes
 	buf := headerToBytes(&headerCopy)
 
-	return binaryutil.VHDChecksum(buf) == header.Checksum
+	return types.Checksum(buf) == header.Checksum
 }
 
 // headerToBytes serializes a DynamicDiskHeader to bytes.

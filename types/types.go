@@ -142,15 +142,15 @@ type FileFooter struct {
 	Features           uint32   // Big-endian
 	FormatVersion      uint32   // Big-endian (0x00010000 = v1.0)
 	NextOffset         uint64   // Big-endian
-	ModificationTime   uint32   // Big-endian (Unix timestamp)
+	ModificationTime   uint32   // Big-endian (seconds since 2000-01-01T00:00:00Z; see Timestamp and Time)
 	CreatorApplication uint32   // Big-endian
 	CreatorVersion     uint32   // Big-endian
 	CreatorOS          uint32   // Big-endian
-	DiskSize           uint64   // Big-endian (virtual disk size)
-	DataSize           uint64   // Big-endian (physical data size)
-	DiskGeometry       uint32   // Big-endian (CHS)
+	OriginalSize       uint64   // Big-endian, offset 40 (virtual size at creation)
+	CurrentSize        uint64   // Big-endian, offset 48 (current virtual size)
+	DiskGeometry       uint32   // Big-endian (CHS; see PackGeometry and UnpackGeometry)
 	DiskType           uint32   // Big-endian
-	Checksum           uint32   // Big-endian (CRC-32)
+	Checksum           uint32   // Big-endian (one's complement of the byte sum, this field taken as zero; see FooterChecksum)
 	Identifier         [16]byte // GUID
 	SavedState         byte
 	Reserved           [427]byte
@@ -167,9 +167,9 @@ type ParsedFileFooter struct {
 	ModTime       time.Time
 	CreatorApp    string
 
-	// Features is the footer's feature flag word. Bit 1 means the image has a
-	// temporary-disk marker and bit 0 is reserved; bit 31 is always set in a
-	// conformant image.
+	// Features is the footer's feature flag word. The specification defines
+	// two flags: FeatureTemporary (0x00000001) marks a temporary disk, and
+	// FeatureReserved (0x00000002) must always be set.
 	Features uint32
 
 	// CreatorVersion is the creating application's version, packed as two
@@ -181,10 +181,10 @@ type ParsedFileFooter struct {
 	CreatorVersion uint32
 	CreatorOS      string
 
-	// DataSize is the disk's size at creation time, where MediaSize is its
+	// OriginalSize is the disk's size at creation time, where MediaSize is its
 	// current size. The two differ on an image that has been expanded, and the
 	// difference is the only record that the expansion happened.
-	DataSize uint64
+	OriginalSize uint64
 
 	// Cylinders, Heads and SectorsPerTrack are the CHS geometry the footer
 	// records. Modern tools ignore CHS, but the values still constrain how a
@@ -213,9 +213,9 @@ type DynamicDiskHeader struct {
 	FormatVersion          uint32   // Big-endian
 	NumberOfBlocks         uint32   // Big-endian
 	BlockSize              uint32   // Big-endian
-	Checksum               uint32   // Big-endian (CRC-32)
+	Checksum               uint32   // Big-endian (one's complement of the byte sum, this field taken as zero)
 	ParentIdentifier       [16]byte // GUID
-	ParentModificationTime uint32   // Big-endian (Unix timestamp)
+	ParentModificationTime uint32   // Big-endian (seconds since 2000-01-01T00:00:00Z; see Time)
 	Reserved1              [4]byte
 	ParentFilename         [512]byte    // UTF-16 BE
 	ParentLocatorEntries   [8 * 24]byte // 8 entries × 24 bytes each
@@ -273,7 +273,7 @@ type ParsedFileInformation struct {
 // ImageHeader represents a VHDX image header (4096 bytes).
 type ImageHeader struct {
 	Signature           [4]byte  // "head"
-	Checksum            uint32   // Little-endian (CRC-32)
+	Checksum            uint32   // Little-endian (CRC-32C)
 	SequenceNumber      uint64   // Little-endian
 	FileWriteIdentifier [16]byte // GUID
 	DataWriteIdentifier [16]byte // GUID
@@ -305,7 +305,7 @@ type ParsedImageHeader struct {
 // RegionTableHeader represents a VHDX region table header (16 bytes).
 type RegionTableHeader struct {
 	Signature       [4]byte // "regi"
-	Checksum        uint32  // Little-endian (CRC-32)
+	Checksum        uint32  // Little-endian (CRC-32C)
 	NumberOfEntries uint32  // Little-endian
 	Reserved        uint32  // Little-endian
 }
@@ -482,6 +482,31 @@ var (
 const (
 	VHDFormatVersion  = 0x00010000 // VHD v1.0
 	VHDXFormatVersion = 0x0001     // VHDX v1.0
+)
+
+// ============================================================================
+// VHD FOOTER FIELD VALUES
+// ============================================================================
+
+// Values for FileFooter fields, typed to match them so a producer can assign
+// them directly. libvhdi never writes an image; these exist for the pure codecs
+// in this package and for tools and tests that build footers of their own.
+const (
+	// FormatVersion1 is the only File Format Version the specification
+	// defines: 1.0. It equals VHDFormatVersion.
+	FormatVersion1 uint32 = 0x00010000
+
+	// FeatureTemporary marks a disk the specification calls a candidate for
+	// deletion on shutdown. FeatureReserved must always be set.
+	FeatureTemporary uint32 = 0x00000001
+	FeatureReserved  uint32 = 0x00000002
+
+	// FixedDataOffset is the Data Offset a fixed disk records: it has no
+	// further structures for the field to point at.
+	FixedDataOffset uint64 = 0xFFFFFFFFFFFFFFFF
+
+	// CreatorOSWindows is the Creator Host OS code "Wi2k".
+	CreatorOSWindows uint32 = 0x5769326B
 )
 
 // ============================================================================

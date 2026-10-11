@@ -1,6 +1,6 @@
 module github.com/aoiflux/libvhdi/change
 
-go 1.26.2
+go 1.25.5
 
 require (
 	github.com/aoiflux/libext v0.3.0

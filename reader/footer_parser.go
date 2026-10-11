@@ -5,11 +5,11 @@ package reader
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 
-	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
 )
 
@@ -192,112 +192,23 @@ func (p *VHDFooterParser) readFooterAtN(offset int64, n int) (*types.ParsedFileF
 	return p.parseFooter(raw, offset)
 }
 
-// parseFooter decodes a 512-byte footer image.
+// parseFooter decodes and validates a 512-byte footer image.
 //
 // offset is where the footer was read from. It is carried only so that errors
 // can say which copy of the footer failed, which is the difference between "the
 // image is broken" and "the trailing footer is broken but the mirror may not
 // be".
 func (p *VHDFooterParser) parseFooter(raw []byte, offset int64) (*types.ParsedFileFooter, error) {
-	br := binaryutil.NewReadAtReaderAtStart(bytes.NewReader(raw))
-
-	// Read footer structure (512 bytes, big-endian)
-	footer := &types.FileFooter{}
-
-	// Read signature (8 bytes)
-	sig, err := br.ReadBytes(8)
+	footer, err := decodeFooter(raw)
 	if err != nil {
 		return nil, err
 	}
-	copy(footer.Signature[:], sig)
 
 	// Verify signature
 	if !bytes.Equal(footer.Signature[:], []byte(types.VHDFooterSignature)) {
 		return nil, types.Corruptf("read VHD footer", types.FileFormatVHD, offset, "Cookie",
 			"signature is %q, not %q", printableSignature(footer.Signature[:]), types.VHDFooterSignature)
 	}
-
-	// Read remaining fields (big-endian)
-	footer.Features, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.FormatVersion, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.NextOffset, err = br.ReadUint64BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.ModificationTime, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.CreatorApplication, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.CreatorVersion, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.CreatorOS, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.DiskSize, err = br.ReadUint64BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.DataSize, err = br.ReadUint64BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.DiskGeometry, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.DiskType, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	footer.Checksum, err = br.ReadUint32BigEndian()
-	if err != nil {
-		return nil, err
-	}
-
-	// Read GUID (16 bytes)
-	identifier, err := br.ReadBytes(16)
-	if err != nil {
-		return nil, err
-	}
-	copy(footer.Identifier[:], identifier)
-
-	// Read saved state flag (1 byte)
-	savedStateByte, err := br.ReadUint8()
-	if err != nil {
-		return nil, err
-	}
-	footer.SavedState = savedStateByte
-
-	// Read reserved padding (427 bytes) — must be stored for checksum calculation.
-	reserved, err := br.ReadBytes(427)
-	if err != nil {
-		return nil, err
-	}
-	copy(footer.Reserved[:], reserved)
 
 	// Verify the footer's one's-complement checksum. This is the only integrity
 	// check a VHD footer carries, so a mismatch means every field below is
@@ -314,28 +225,26 @@ func (p *VHDFooterParser) parseFooter(raw []byte, offset int64) (*types.ParsedFi
 	parsed := &types.ParsedFileFooter{
 		FormatVersion:  footer.FormatVersion,
 		NextOffset:     int64(footer.NextOffset),
-		MediaSize:      footer.DiskSize,
+		MediaSize:      footer.CurrentSize,
 		DiskType:       types.DiskType(footer.DiskType),
 		Checksum:       footer.Checksum,
 		Identifier:     footer.Identifier,
-		ModTime:        vhdTimestamp(footer.ModificationTime),
+		ModTime:        types.Time(footer.ModificationTime),
 		CreatorApp:     creatorAppString(footer.CreatorApplication),
 		Features:       footer.Features,
 		CreatorVersion: footer.CreatorVersion,
 		CreatorOS:      creatorAppString(footer.CreatorOS),
-		DataSize:       footer.DataSize,
+		OriginalSize:   footer.OriginalSize,
 		SavedState:     footer.SavedState != 0,
-
-		// Disk geometry packs cylinders into the high 16 bits, then heads and
-		// sectors-per-track into one byte each.
-		Cylinders:       uint16(footer.DiskGeometry >> 16),
-		Heads:           uint8(footer.DiskGeometry >> 8),
-		SectorsPerTrack: uint8(footer.DiskGeometry),
 	}
+
+	// Disk geometry packs cylinders into the high 16 bits, then heads and
+	// sectors-per-track into one byte each.
+	parsed.Cylinders, parsed.Heads, parsed.SectorsPerTrack = types.UnpackGeometry(footer.DiskGeometry)
 
 	// Validate format version (must be 0x00010000 = v1.0). A different version
 	// is a well-formed image this library cannot read, not a damaged one.
-	if footer.FormatVersion != 0x00010000 {
+	if footer.FormatVersion != types.FormatVersion1 {
 		return nil, types.Unsupportedf("read VHD footer", types.FileFormatVHD, offset, "File Format Version",
 			"version %#08x, only 0x00010000 (1.0) is implemented", footer.FormatVersion)
 	}
@@ -356,7 +265,7 @@ func (p *VHDFooterParser) parseFooter(raw []byte, offset int64) (*types.ParsedFi
 	// dynamic/differencing must have a sane offset (>= 512).
 	switch parsed.DiskType {
 	case types.DiskTypeFixed:
-		if footer.NextOffset != 0xFFFFFFFFFFFFFFFF {
+		if footer.NextOffset != types.FixedDataOffset {
 			return nil, types.Corruptf("read VHD footer", types.FileFormatVHD, offset, "Data Offset",
 				"fixed disk records %#016x, but a fixed disk has no further structures and must record 0xFFFFFFFFFFFFFFFF",
 				footer.NextOffset)
@@ -377,40 +286,38 @@ func (p *VHDFooterParser) parseFooter(raw []byte, offset int64) (*types.ParsedFi
 // bytes with the checksum field zeroed — not a CRC. CRC-32C applies only to
 // VHDX structures.
 func (p *VHDFooterParser) VerifyFooterChecksum(footer *types.FileFooter) bool {
-	// Checksum is calculated with the checksum field itself set to zero
-	// Create a copy with checksum zeroed out
-	footerCopy := *footer
-	footerCopy.Checksum = 0
-
-	// Serialize footer to bytes
-	buf := footerToBytes(&footerCopy)
-
-	return binaryutil.VHDChecksum(buf) == footer.Checksum
+	return types.FooterChecksum(footer) == footer.Checksum
 }
 
-// footerToBytes serializes a FileFooter to bytes.
-func footerToBytes(footer *types.FileFooter) []byte {
-	buf := new(bytes.Buffer)
+// decodeFooter decodes the 512-byte footer structure field by field, without
+// validating any of it. It is the inverse of types.FileFooter.MarshalBinary.
+func decodeFooter(raw []byte) (*types.FileFooter, error) {
+	if len(raw) != types.VHDFooterSize {
+		return nil, fmt.Errorf("VHD footer is %d bytes, want %d", len(raw), types.VHDFooterSize)
+	}
 
-	// Write all fields in big-endian order
-	buf.Write(footer.Signature[:])
-	writeBE32(buf, footer.Features)
-	writeBE32(buf, footer.FormatVersion)
-	writeBE64(buf, footer.NextOffset)
-	writeBE32(buf, footer.ModificationTime)
-	writeBE32(buf, footer.CreatorApplication)
-	writeBE32(buf, footer.CreatorVersion)
-	writeBE32(buf, footer.CreatorOS)
-	writeBE64(buf, footer.DiskSize)
-	writeBE64(buf, footer.DataSize)
-	writeBE32(buf, footer.DiskGeometry)
-	writeBE32(buf, footer.DiskType)
-	writeBE32(buf, footer.Checksum)
-	buf.Write(footer.Identifier[:])
-	buf.WriteByte(footer.SavedState)
-	buf.Write(footer.Reserved[:])
+	be := binary.BigEndian
+	footer := &types.FileFooter{
+		Features:           be.Uint32(raw[8:12]),
+		FormatVersion:      be.Uint32(raw[12:16]),
+		NextOffset:         be.Uint64(raw[16:24]),
+		ModificationTime:   be.Uint32(raw[24:28]),
+		CreatorApplication: be.Uint32(raw[28:32]),
+		CreatorVersion:     be.Uint32(raw[32:36]),
+		CreatorOS:          be.Uint32(raw[36:40]),
+		OriginalSize:       be.Uint64(raw[40:48]),
+		CurrentSize:        be.Uint64(raw[48:56]),
+		DiskGeometry:       be.Uint32(raw[56:60]),
+		DiskType:           be.Uint32(raw[60:64]),
+		Checksum:           be.Uint32(raw[64:68]),
+		SavedState:         raw[84],
+	}
+	copy(footer.Signature[:], raw[0:8])
+	copy(footer.Identifier[:], raw[68:84])
+	// The reserved padding is kept: it is part of the checksummed bytes.
+	copy(footer.Reserved[:], raw[85:])
 
-	return buf.Bytes()
+	return footer, nil
 }
 
 // Helper functions for writing big-endian values

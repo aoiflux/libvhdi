@@ -359,6 +359,65 @@ func TestCorpusHarnessDetectsMismatch(t *testing.T) {
 	}
 }
 
+// TestCorpusVHDFootersMatchTheCodecs holds the exported footer codecs to the
+// reference producer. Every .vhd in the corpus was written by Hyper-V's New-VHD,
+// so its trailing footer is Microsoft's own encoding of the geometry, the
+// checksum and the field layout, and the codecs must reproduce it exactly.
+func TestCorpusVHDFootersMatchTheCodecs(t *testing.T) {
+	dir := corpusDir(t)
+
+	images, err := filepath.Glob(filepath.Join(dir, "*.vhd"))
+	if err != nil {
+		t.Fatalf("scanning %s: %v", dir, err)
+	}
+	if len(images) == 0 {
+		t.Skipf("no .vhd images in %s", dir)
+	}
+
+	for _, image := range images {
+		t.Run(filepath.Base(image), func(t *testing.T) {
+			f, err := os.Open(image)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+
+			info, err := f.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tail := make([]byte, types.VHDFooterSize)
+			if _, err := f.ReadAt(tail, info.Size()-types.VHDFooterSize); err != nil {
+				t.Fatalf("reading the trailing footer: %v", err)
+			}
+
+			footer, err := decodeFooter(tail)
+			if err != nil {
+				t.Fatalf("decodeFooter: %v", err)
+			}
+
+			if got := types.FooterChecksum(footer); got != footer.Checksum {
+				t.Errorf("FooterChecksum = %#08x, New-VHD stored %#08x", got, footer.Checksum)
+			}
+
+			wc, wh, ws := types.UnpackGeometry(footer.DiskGeometry)
+			c, h, s := types.CHSGeometry(footer.CurrentSize / types.DefaultSectorSize)
+			if c != wc || h != wh || s != ws {
+				t.Errorf("CHSGeometry(%d sectors) = %d/%d/%d, New-VHD recorded %d/%d/%d",
+					footer.CurrentSize/types.DefaultSectorSize, c, h, s, wc, wh, ws)
+			}
+
+			again, _ := footer.MarshalBinary()
+			if !bytes.Equal(again, tail) {
+				t.Errorf("MarshalBinary does not reproduce New-VHD's footer byte for byte")
+			}
+
+			t.Logf("size=%d geometry=%d/%d/%d creator=%q/%q", footer.CurrentSize, wc, wh, ws,
+				creatorAppString(footer.CreatorApplication), creatorAppString(footer.CreatorOS))
+		})
+	}
+}
+
 // corpusImages returns every image in dir that has a .raw counterpart.
 func corpusImages(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)

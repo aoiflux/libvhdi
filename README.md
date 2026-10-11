@@ -62,7 +62,7 @@ without an external C dependency.
 | [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md) | Deliberate deviations, recovery paths beyond the specification, and the qemu disagreement |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, the zero-dependency constraint, and the three tiers of change tracking |
 | [docs/FORENSICS.md](docs/FORENSICS.md) | What the library guarantees, what to check before trusting a result, and the limitations worth stating in a report |
-| [docs/MIGRATION.md](docs/MIGRATION.md) | Upgrading to v0.3.0. Most consumers need no changes |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Upgrading to v0.4.0 and v0.3.0. Most consumers need no changes |
 | [Release notes](https://github.com/aoiflux/libvhdi/releases/latest) | What changed in the current release, why it matters, and what it does not claim |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 
@@ -410,6 +410,25 @@ const (
 )
 ```
 
+### VHD codecs (package `types`)
+
+Pure functions over bytes and values, for tools and tests that produce a VHD
+footer of their own. They are the code the reader verifies with, so a footer
+built with them is one libvhdi accepts. None of them touches a file.
+
+| Symbol                                                        | Description                                                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `Checksum(b []byte) uint32`                                   | One's complement of the byte sum: the VHD footer and dynamic header checksum   |
+| `FooterChecksum(f *FileFooter) uint32`                        | The checksum `f` should carry, computed with its Checksum field taken as zero  |
+| `(*FileFooter).MarshalBinary() ([]byte, error)`               | The 512-byte big-endian footer, every field at its specified offset            |
+| `Epoch`                                                       | 2000-01-01T00:00:00Z, the VHD timestamp epoch                                  |
+| `Time(v uint32) time.Time`                                    | Decode a VHD timestamp; 0 gives the zero Time ("none recorded")                |
+| `Timestamp(t time.Time) uint32`                               | Encode a VHD timestamp; clamps to 0 and 0xFFFFFFFF instead of wrapping         |
+| `CHSGeometry(totalSectors uint64) (uint16, uint8, uint8)`     | Cylinders, heads and sectors per track, per the specification's appendix       |
+| `PackGeometry(c uint16, h, s uint8) uint32` / `UnpackGeometry` | The footer's Disk Geometry field: `c<<16 \| h<<8 \| s`                         |
+| `FormatVersion1`, `FixedDataOffset`, `CreatorOSWindows`       | Footer field values: version 1.0, a fixed disk's Data Offset, `"Wi2k"`         |
+| `FeatureTemporary`, `FeatureReserved`                         | Footer feature flags; `FeatureReserved` must always be set                     |
+
 ## Included Example Programs
 
 Two of these — `offsets` and `changes` — are **separate modules** with their own
@@ -561,7 +580,7 @@ on six filesystem libraries.
 | `metadata`                   | VHDX metadata table and region table parsing                  |
 | `report`                     | Versioned JSON report documents                               |
 | `vhdimap`                    | Interfaces a filesystem parser implements for file-level change detection. Declarations only; imports nothing but the standard library |
-| `types`                      | Data structure definitions, constants, GUIDs, error sentinels |
+| `types`                      | Data structure definitions, constants, GUIDs, error sentinels, pure VHD footer codecs |
 | `internal/vhdxlog`           | VHDX log parsing and read-only replay overlay                 |
 | `internal/binaryutil`        | Endian-aware parsing utilities, checksums                     |
 | `internal/buildinfo`         | The library's own module version                              |
@@ -573,6 +592,7 @@ module. Not importing it costs nothing: the core module has no dependencies and
 ## Robustness
 
 The library is read-only and never writes to an image.
+Pure footer codecs (checksum, CHS geometry, timestamp, footer marshal) are provided in `types` for tests and tools.
 
 Structures read from an image are cross-checked before they drive any allocation
 or read: block counts, table offsets and region sizes must be internally
