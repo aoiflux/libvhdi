@@ -24,6 +24,37 @@ link time, so it reports what was actually compiled in and cannot be wrong.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-11
+
+Follow-up fixes to v0.4.0. No API change.
+
+### Changed
+
+- **`types.Epoch` is documented as informational** (VHDI-R1). It is an exported
+  variable, so a caller can assign it. `Time` and `Timestamp` use an unexported
+  constant and never read `Epoch`, so assigning it has no effect on any codec.
+  That was already so in v0.4.0, but nothing said it or tested it. `Epoch` stays
+  exported, because removing it would break the API.
+- **The satellite modules use the current filesystem library releases**
+  (VHDI-R2). `change` and `examples/changes` move to libext v0.4.0, libfat
+  v0.3.3, libntfs v0.3.4 and libtable v0.2.3. `examples/offsets` moves from
+  libtable v0.1.1 and libext v0.1.0 to libtable v0.2.3 and libext v0.4.0. No
+  code change was needed. The core module still has no dependencies.
+
+### Tests
+
+- **The CHS port is checked against Windows on every run** (VHDI-T1).
+  `reader/testdata/footers` holds the 512-byte footers of VHDs created by the
+  Windows virtual disk API: fixed 3 MiB, 512 MiB, 1 GiB and 40 GiB, and a
+  dynamic 127 GiB. `TestWindowsFootersMatchTheCodecs` parses each, recomputes
+  `CHSGeometry(CurrentSize/512)` and `FooterChecksum`, compares them with what
+  Windows stored, and round-trips the bytes through `MarshalBinary`. It needs
+  no environment variable, so CI runs it. All five match, including the values
+  v0.4.0 had derived by hand. A README next to the footers records how they
+  were made. The full-image `TestCorpusVHDFootersMatchTheCodecs` is unchanged.
+- `TestReassigningEpochDoesNotChangeTheCodecs` assigns `types.Epoch` and checks
+  that `Time` and `Timestamp` are unaffected.
+
 ## [0.4.0] - 2026-10-11
 
 Pure VHD footer codecs for tools and tests that produce footers of their own,
@@ -615,7 +646,8 @@ the data stream, guarded by `TestFixedVHD_ReadAtDoesNotLeakFooter`.
 Initial release. VHD and VHDX parsing, fixed and dynamic disks, checksum
 verification.
 
-[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/aoiflux/libvhdi/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/aoiflux/libvhdi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aoiflux/libvhdi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aoiflux/libvhdi/compare/v0.1.0...v0.2.0

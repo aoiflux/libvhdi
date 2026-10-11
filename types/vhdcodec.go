@@ -20,9 +20,13 @@ import (
 // is not a cosmetic error in a library whose output is evidence: an image's
 // creation time and a parent's recorded modification time are exactly the sort
 // of fact a report exists to state.
+//
+// Epoch is informational. Time and Timestamp never read it; they use a constant,
+// so assigning a different value to Epoch has no effect on any codec.
 var Epoch = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-// epochUnix is Epoch as a Unix timestamp.
+// epochUnix is the VHD epoch as a Unix timestamp. Every codec uses it rather
+// than Epoch, which is an exported variable a caller could reassign.
 const epochUnix = 946684800
 
 // Time converts a raw VHD timestamp into a UTC time.

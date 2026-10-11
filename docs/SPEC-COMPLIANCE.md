@@ -150,6 +150,8 @@ silently skipped.
   Size, and reading the two the other way round truncates it.
 - VHD CHS geometry, where `types.CHSGeometry` computes it, follows the
   appendix's "CHS Calculation" exactly, including the 65535 × 16 × 255 cap.
+  `TestWindowsFootersMatchTheCodecs` checks it on every run against footers
+  Windows wrote, from 3 MiB to 127 GiB, kept in `reader/testdata/footers`.
 - VHD `Data Offset` must be `0xFFFFFFFFFFFFFFFF` on a fixed disk.
 - VHDX CRC-32C over all 4096 bytes of each header, with the checksum field
   zeroed.

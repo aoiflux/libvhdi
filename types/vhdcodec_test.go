@@ -32,6 +32,28 @@ func TestEpochIsTheYear2000(t *testing.T) {
 	}
 }
 
+func TestReassigningEpochDoesNotChangeTheCodecs(t *testing.T) {
+	// Epoch is an exported variable, so a caller can assign it. The codecs
+	// must not follow: the format's epoch is fixed by the specification.
+	at := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+	wantTime := types.Time(1)
+	wantStamp := types.Timestamp(at)
+
+	saved := types.Epoch
+	t.Cleanup(func() { types.Epoch = saved })
+	types.Epoch = time.Unix(0, 0).UTC()
+
+	if got := types.Time(1); !got.Equal(wantTime) {
+		t.Fatalf("after reassigning Epoch, Time(1) = %s, want %s", got, wantTime)
+	}
+	if got := types.Timestamp(at); got != wantStamp {
+		t.Fatalf("after reassigning Epoch, Timestamp(%s) = %d, want %d", at, got, wantStamp)
+	}
+	if got := types.Time(1); !got.Equal(time.Date(2000, time.January, 1, 0, 0, 1, 0, time.UTC)) {
+		t.Fatalf("Time(1) = %s, want 2000-01-01T00:00:01Z", got)
+	}
+}
+
 func TestTimeDecodesFromTheYear2000(t *testing.T) {
 	for _, tc := range []struct {
 		name string

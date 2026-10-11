@@ -707,6 +707,11 @@ library takes the virtual size from the footer's own size field and clamps reads
 to it, so the footer never enters the data stream. That is the behaviour
 `TestFixedVHD_ReadAtDoesNotLeakFooter` guards.
 
+**Windows footers, no setup.** `reader/testdata/footers` holds the 512-byte
+footers of five VHDs Windows created, from 3 MiB to 127 GiB.
+`TestWindowsFootersMatchTheCodecs` checks the CHS geometry, checksum and footer
+layout against them on every `go test`, so this check needs no corpus.
+
 **Hyper-V, requires elevation.** `scripts/gen-corpus.ps1` drives `New-VHD`, which
 is the only route to a producer-generated *differencing chain* — qemu-img reports
 "Backing file not supported" for both formats. Chain correctness otherwise rests

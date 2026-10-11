@@ -1,4 +1,4 @@
-github.com/aoiflux/libext v0.1.0 h1:pHEcNKC6ckk5pcft57Q1xITMbfCc4sX72kYWweyo3ug=
-github.com/aoiflux/libext v0.1.0/go.mod h1:3G3wyW96Lxdcyh0jNbMNw8aMF3kPw4aBnEQ7ALwTZs0=
-github.com/aoiflux/libtable v0.1.1 h1:iQC+D2lIfGKCyQRZ7QArXNqL7KSv4xH0EXOii09NGj0=
-github.com/aoiflux/libtable v0.1.1/go.mod h1:6MlTCv0DnR06SBvi2XZbw1ZslEecNaFbWs8xXwYCVKI=
+github.com/aoiflux/libext v0.4.0 h1:tOeyPIAbr/kYiOqOQiag7pXVI7/YaR5laNlypGpTJfw=
+github.com/aoiflux/libext v0.4.0/go.mod h1:3G3wyW96Lxdcyh0jNbMNw8aMF3kPw4aBnEQ7ALwTZs0=
+github.com/aoiflux/libtable v0.2.3 h1:eyeiok7qd6Aw4vnimURdREicyFhUkhwCE5Q/P0XmrOc=
+github.com/aoiflux/libtable v0.2.3/go.mod h1:6MlTCv0DnR06SBvi2XZbw1ZslEecNaFbWs8xXwYCVKI=

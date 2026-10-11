@@ -20,7 +20,8 @@
 # PowerShell is happiest with CRLF on Windows.
 *.ps1   text eol=crlf
 
-# Virtual disk images and raw dumps must never be transformed.
+# Virtual disk images, raw dumps and captured footers must never be transformed.
 *.vhd   binary
 *.vhdx  binary
 *.raw   binary
+*.bin   binary
