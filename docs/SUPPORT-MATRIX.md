@@ -59,8 +59,8 @@ is not later mistaken for a defect.
 | `parent_linkage` | ✔ | The parent's **data-write** GUID, not its virtual disk identifier. Conflating the two is what makes a chain fail to link up |
 | `parent_linkage2` | ✘ | Deliberately unparsed — see `docs/SPEC-COMPLIANCE.md` |
 | Creator string | ✔ | Decoded as UTF-16LE. Read as a byte string it stops at the first character |
-| BAT states 0, 1, 2, 3, 6, 7 | ✔ | |
-| Chunk ratio and sector bitmaps | ✔ | |
+| BAT states 0, 1, 2, 3, 6, 7 | ✔ | State 7 resolves per sector at any byte offset. Before v0.4.2 a read starting mid-sector in a state-7 block returned bytes shifted back by that offset |
+| Chunk ratio and sector bitmaps | ✔ | The BAT holds the entry count MS-VHDX 2.5 gives for the disk type. Before v0.4.2 a differencing disk ending inside a chunk lost that chunk's sector bitmap |
 | 512-byte and 4096-byte logical sectors | ✔ | |
 | Log replay | ✔ | Circular buffer, torn-write detection, zero descriptors, strict sequence. Applied into a **read-only in-memory overlay**, so the file stays byte-identical |
 | Unreplayable log | ~ | Refused with `ErrDirtyImage` unless `Options.AllowDirtyImage` is set. `IsDirty()` reports the state |

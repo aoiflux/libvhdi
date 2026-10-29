@@ -78,8 +78,8 @@ against libyal vhdimount. No API break.
 - **A differencing VHDX whose BAT region, or file, is too small for the
   specification's entry count is refused** with `ErrCorruptImage`. Before, it
   opened and silently lost its last chunk's sector bitmap. Hyper-V writes the
-  full count: a 127 GiB disk needs 65,568 entries (512 KiB) of its 1 MiB
-  region. Every layer of the DUES corpus opens.
+  full count: a 127 GiB disk needs 65,568 entries (524,544 bytes) of its
+  1 MiB region. Every layer of the DUES corpus opens.
 - A fixed or dynamic VHDX needs one BAT entry fewer than before, which is
   the specification's count. For such a disk whose block count is a multiple
   of the chunk ratio, the last chunk's sector bitmap is now reported absent.

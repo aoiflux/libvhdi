@@ -218,3 +218,11 @@ either format, reporting "Backing file not supported". `scripts/gen-corpus.ps1`
 drives Hyper-V's `New-VHD` and is the only route to a producer-generated chain,
 but it needs an elevated session. Chain correctness otherwise rests on
 spec-derived fixtures.
+
+Spec-derived fixtures share an author with the parser and can be wrong the same
+way. They missed both differencing defects fixed in v0.4.2. No fixture read a
+partially present block at an unaligned offset, and the fixtures were sized
+around the BAT miscount instead of to section 2.5. A downstream consumer found
+both on Hyper-V checkpoint chains and confirmed them against libyal's
+vhdimount. After the fix, that consumer's corpus tests pass against this
+library. The corpus is not in this repository.

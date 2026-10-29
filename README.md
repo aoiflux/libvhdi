@@ -673,7 +673,8 @@ go test ./internal/vhdxlog -run '^$' -fuzz FuzzAnalyze        -fuzztime 60s
 
 Test images are generated in-process by the builders in
 `reader/vhdfixture_test.go` and `reader/vhdxfixture_test.go`, so the repository
-carries no binary fixtures. They are written to the published specifications
+carries no binary images. The only binary test data is the five 512-byte
+Windows footers described below. The images are written to the published specifications
 rather than to whatever the current parser accepts, which is what surfaced the
 VHD checksum defect fixed in v0.2.0.
 
@@ -716,6 +717,12 @@ layout against them on every `go test`, so this check needs no corpus.
 is the only route to a producer-generated *differencing chain* — qemu-img reports
 "Backing file not supported" for both formats. Chain correctness otherwise rests
 on the spec-derived fixtures.
+
+Those fixtures missed both differencing defects fixed in v0.4.2: no test read a
+partially present block at an unaligned offset, and the fixtures were sized
+around the BAT miscount. Both were found on Hyper-V checkpoint chains outside
+this repository, and the fixes were checked there too. No test here reads those
+images.
 
 The corpus tests compare the decoded stream byte for byte and probe block and
 sector boundaries with random-access reads. They skip when `LIBVHDI_CORPUS` is
