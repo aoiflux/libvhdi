@@ -24,6 +24,94 @@ link time, so it reports what was actually compiled in and cannot be wrong.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-29
+
+Two data-correctness fixes for differencing VHDX. Both returned wrong bytes with
+no error, so anything indexed or hashed from an affected read held content the
+snapshot never had. Both were found by DUES on a Hyper-V corpus and checked
+against libyal vhdimount. No API break.
+
+### Fixed
+
+- **Data correctness: an unaligned read in a PARTIALLY_PRESENT block returned
+  bytes from the start of the sector** (PAR-31). `VHDXBlockReader` read each
+  present sector of a state-7 block from the start of the sector, even for
+  the first sector of a read that begins partway into it. The result was
+  shifted back by the read's offset within the sector. Sector-aligned reads
+  were correct, so the damage showed where data is read at odd offsets: on a
+  Hyper-V Ubuntu chain, the ext4 root inode, 256 bytes into a sector, read
+  wrong in every layer, and the newest snapshot listed no files. Every differencing
+  VHDX was affected, through `ReadAt` and through the chain resolver. Each
+  chunk is now read from the block offset it is copied to.
+- **Data correctness: a differencing VHDX that ends partway through a chunk
+  lost that chunk's sector bitmap** (PAR-33). A chunk's sector bitmap entry
+  follows its payload entries in the BAT, and a differencing BAT holds whole
+  chunks (MS-VHDX 2.5). The parser read `N + ceil(N/R)` entries, which stops
+  short of the last chunk's bitmap entry whenever the block count `N` is not
+  a multiple of the chunk ratio `R`. That bitmap was then taken as absent:
+  every PARTIALLY_PRESENT block in the last chunk was read wholly from the
+  parent (or as zeroes with no parent), and `Extents` reported its sectors as
+  the parent's. A disk smaller than one chunk lost its only bitmap. Hyper-V's
+  default 127 GiB disk has 2 MiB blocks and `R = 2048`, so its last 3 GiB were
+  affected; every differencing layer in the DUES corpus ends inside a chunk.
+  The BAT is now read with the count the specification gives for the disk
+  type, `ceil(N/R) × (R + 1)` for a differencing disk.
+
+### Added
+
+- `bat.VHDXBATEntryCount(blockCount, chunkRatio, diskType)` returns the
+  MS-VHDX 2.5 BAT entry count for a disk type: `ceil(N/R) × (R + 1)` for a
+  differencing disk, `N + floor((N - 1)/R)` for a fixed or dynamic one. The
+  reader validates the BAT size with the same function that sizes the read,
+  so the two cannot drift apart.
+- `bat.VHDXBATParser.ReadBATForDiskType` reads that many entries.
+
+### Deprecated
+
+- `bat.VHDXBATParser.ReadBAT`. Its behaviour is unchanged, which means it
+  still misses the last chunk's sector bitmap of a differencing disk whose
+  block count is not a multiple of the chunk ratio. Use
+  `ReadBATForDiskType`. The reader no longer calls it.
+
+### Changed
+
+- **A differencing VHDX whose BAT region, or file, is too small for the
+  specification's entry count is refused** with `ErrCorruptImage`. Before, it
+  opened and silently lost its last chunk's sector bitmap. Hyper-V writes the
+  full count: a 127 GiB disk needs 65,568 entries (512 KiB) of its 1 MiB
+  region. Every layer of the DUES corpus opens.
+- A fixed or dynamic VHDX needs one BAT entry fewer than before, which is
+  the specification's count. For such a disk whose block count is a multiple
+  of the chunk ratio, the last chunk's sector bitmap is now reported absent.
+  The specification does not require that entry to exist, and these disk
+  types never use it: a PARTIALLY_PRESENT block is invalid outside a
+  differencing disk.
+
+### Tests
+
+- `TestVHDXPartialBlockUnalignedReads` (block) and
+  `TestDifferencingVHDXUnalignedReadsInPartialBlock` (a chain opened with
+  `OpenFileWith`) read at every start offset in the first two sectors, at
+  lengths within, up to and across sector boundaries, for 512- and
+  4096-byte sectors, and compare each result with a byte model.
+  `TestDifferencingVHDXUnalignedReadReport` is the reproduction from the
+  report.
+- `TestVHDXPartialBlockExtentsMatchReadAt` checks that the bytes at each
+  mapped extent's file offset are the bytes `ReadAt` returns, for a range
+  starting mid-sector. `Extents` was already right; `ReadAt` was not.
+- `TestDifferencingVHDXPartialLastChunk` gives a disk a PARTIALLY_PRESENT
+  block in a one-block last chunk and checks reads, `vhdxSectorPresent` and
+  `Extents`. `TestDifferencingVHDXSingleChunkBitmap` covers a disk smaller
+  than one chunk. `TestDifferencingVHDXExactChunkMultiple` is the control
+  that already passed.
+- `TestVHDXBATEntryCount`, `TestVHDXBATForDiskTypeLastPartialChunk` and
+  `TestVHDXGeometryBATCount` pin the counts, the parsed bitmap offsets and the
+  BAT size check.
+- The fixture BAT region grows from 512 KiB to 1 MiB, because the
+  4096-byte-sector differencing fixture now needs 16 bytes more than 512 KiB.
+  Two fixture comments that described the old count as a format rule are
+  corrected.
+
 ## [0.4.1] - 2026-10-11
 
 Follow-up fixes to v0.4.0. No API change.
@@ -646,7 +734,8 @@ the data stream, guarded by `TestFixedVHD_ReadAtDoesNotLeakFooter`.
 Initial release. VHD and VHDX parsing, fixed and dynamic disks, checksum
 verification.
 
-[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/aoiflux/libvhdi/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/aoiflux/libvhdi/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/aoiflux/libvhdi/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/aoiflux/libvhdi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aoiflux/libvhdi/compare/v0.2.0...v0.3.0

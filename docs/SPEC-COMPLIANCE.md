@@ -168,7 +168,14 @@ silently skipped.
 - VHDX block size between 1 MB and 256 MB and a multiple of 512.
 - VHDX logical and physical sector size of exactly 512 or 4096.
 - Virtual disk size a whole multiple of the logical sector size.
-- The block allocation table must hold one entry per block of the device.
+- The block allocation table must hold the entry count section 2.5 gives for
+  the disk type: `PayloadBlocksCount + floor((PayloadBlocksCount − 1) /
+  ChunkRatio)` for a fixed or dynamic disk, and `SectorBitmapBlocksCount ×
+  (ChunkRatio + 1)` for a differencing disk. The parser reads exactly that
+  many entries, and the size check uses the same function. A differencing BAT
+  holds whole chunks, so the last chunk's sector bitmap entry is part of it
+  even when the disk ends inside that chunk. Before v0.4.2 that entry was not
+  read, and the sectors a snapshot held there were served from its parent.
 
 ## Things that are not in either specification
 

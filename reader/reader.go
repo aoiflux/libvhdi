@@ -343,9 +343,10 @@ func openVHDX(r io.ReaderAt, fileSize int64, allowDirty bool) (*VirtualDisk, err
 	// validateVHDXGeometry, so this conversion cannot truncate.
 	blockCount := uint32((metaVals.VirtualDiskSize + uint64(metaVals.BlockSize) - 1) / uint64(metaVals.BlockSize))
 
-	// Parse BAT.
+	// Parse BAT. A differencing BAT holds whole chunks, so its entry count, and
+	// whether the last chunk's sector bitmap is reachable, depend on the type.
 	batParser := bat.NewVHDXBATParser(src)
-	vhdxBat, err := batParser.ReadBAT(batOffset, blockCount, metaVals.BlockSize, metaVals.LogicalSectorSize)
+	vhdxBat, err := batParser.ReadBATForDiskType(batOffset, blockCount, metaVals.BlockSize, metaVals.LogicalSectorSize, metaVals.DiskType)
 	if err != nil {
 		return nil, err
 	}

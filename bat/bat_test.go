@@ -157,6 +157,86 @@ func TestVHDXBATPayloadBlockNotPresent(t *testing.T) {
 	}
 }
 
+// TestVHDXBATEntryCount pins the two counts of MS-VHDX 2.5. A differencing
+// BAT holds whole chunks, so it reaches the last chunk's sector bitmap entry;
+// a fixed or dynamic BAT ends at the last payload entry.
+func TestVHDXBATEntryCount(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		blocks, ratio    uint64
+		differencing, fd uint64
+	}{
+		// Hyper-V's default 127 GiB disk: 2 MiB blocks, 512-byte sectors.
+		{"127 GiB", 65024, 2048, 32 * 2049, 65024 + 31},
+		{"10 GiB", 5120, 2048, 3 * 2049, 5120 + 2},
+		{"exact chunk multiple", 4096, 2048, 2 * 2049, 4096 + 1},
+		{"one block", 1, 16, 17, 1},
+		{"one block into the second chunk", 17, 16, 34, 18},
+		{"no blocks", 0, 16, 0, 0},
+		{"zero chunk ratio", 17, 0, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := bat.VHDXBATEntryCount(c.blocks, c.ratio, types.DiskTypeDifferential); got != c.differencing {
+				t.Errorf("differencing = %d, want %d", got, c.differencing)
+			}
+			for _, dt := range []types.DiskType{types.DiskTypeDynamic, types.DiskTypeFixed} {
+				if got := bat.VHDXBATEntryCount(c.blocks, c.ratio, dt); got != c.fd {
+					t.Errorf("disk type %d = %d, want %d", dt, got, c.fd)
+				}
+			}
+		})
+	}
+}
+
+// TestVHDXBATForDiskTypeLastPartialChunk reads a differencing BAT that ends one
+// block into its second chunk. 256 MiB blocks and 512-byte sectors give a chunk
+// ratio of 16, so 17 blocks span two chunks and the BAT holds 2 x 17 entries.
+// The chunk-1 sector bitmap entry is the last of them, at index 33.
+func TestVHDXBATForDiskTypeLastPartialChunk(t *testing.T) {
+	const (
+		blockSize = 256 << 20
+		blocks    = 17
+		ratio     = 16
+	)
+
+	raw := make([]uint64, 2*(ratio+1))
+	raw[ratio] = 8<<20 | 6                                                 // chunk-0 sector bitmap, present
+	raw[16+16/ratio] = 10<<20 | uint64(types.BlockStatePartiallyAllocated) // block 16
+	raw[1*(ratio+1)+ratio] = 9<<20 | 6                                     // chunk-1 sector bitmap, present
+	data := buildVHDXBATData(raw)
+
+	p := bat.NewVHDXBATParser(bytes.NewReader(data))
+	b, err := p.ReadBATForDiskType(0, blocks, blockSize, 512, types.DiskTypeDifferential)
+	if err != nil {
+		t.Fatalf("ReadBATForDiskType: %v", err)
+	}
+	if b.ChunkRatio != ratio {
+		t.Fatalf("ChunkRatio = %d, want %d", b.ChunkRatio, ratio)
+	}
+	want := []int64{8 << 20, 9 << 20}
+	if len(b.SectorBitmapOffsets) != len(want) {
+		t.Fatalf("SectorBitmapOffsets = %v, want %v", b.SectorBitmapOffsets, want)
+	}
+	for i := range want {
+		if b.SectorBitmapOffsets[i] != want[i] {
+			t.Errorf("SectorBitmapOffsets[%d] = %d, want %d", i, b.SectorBitmapOffsets[i], want[i])
+		}
+	}
+	if e := b.Entries[16]; e.BlockState != types.BlockStatePartiallyAllocated || e.FileOffset != 10<<20 {
+		t.Errorf("block 16 = %+v, want PARTIALLY_PRESENT at %d", e, 10<<20)
+	}
+
+	// ReadBAT keeps its v0.4.1 count, which stops short of the chunk-1 entry.
+	// This is why it is deprecated.
+	legacy, err := p.ReadBAT(0, blocks, blockSize, 512)
+	if err != nil {
+		t.Fatalf("ReadBAT: %v", err)
+	}
+	if got := legacy.SectorBitmapOffsets[1]; got != -1 {
+		t.Errorf("ReadBAT SectorBitmapOffsets[1] = %d, want -1 (unchanged legacy behaviour)", got)
+	}
+}
+
 // ============================================================================
 // Sector bitmap tests
 // ============================================================================

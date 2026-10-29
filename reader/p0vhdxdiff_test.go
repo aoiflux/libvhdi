@@ -13,10 +13,12 @@ import (
 // vhdxDiffFixtures builds a matched parent/child VHDX pair.
 //
 // chunkRatio for a 1 MB block size and 512-byte sectors is 4096, so the sector
-// bitmap entry for chunk 0 lands at BAT index 4096. The virtual disk therefore
-// has to span more than 4096 blocks for that entry to exist at all — hence the
-// 4097 MB virtual size. Only block 0 is actually allocated, so the images stay
-// small.
+// bitmap entry for chunk 0 lands at BAT index 4096. The 4097 MB virtual size
+// was chosen when the parser read only N+ceil(N/R) BAT entries and so missed
+// that entry on any smaller disk. A differencing BAT holds whole chunks (MS-VHDX
+// 2.5), and the parser now reads them (PAR-33). The size is kept because it
+// also gives the disk a partial last chunk. Only block 0 is actually allocated,
+// so the images stay small.
 const (
 	vhdxDiffBlockSize  = 1 * mb
 	vhdxDiffSectorSize = 512

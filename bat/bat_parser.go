@@ -101,7 +101,33 @@ func NewVHDXBATParser(r io.ReaderAt) *VHDXBATParser {
 	return &VHDXBATParser{reader: r}
 }
 
-// ReadBAT reads the VHDX BAT from the specified offset and block count.
+// VHDXBATEntryCount returns the number of entries in the BAT of a VHDX disk
+// with blockCount payload blocks and the given chunk ratio, per MS-VHDX section
+// 2.5.
+//
+// The count depends on the disk type. A fixed or dynamic BAT ends at the entry
+// of the last payload block:
+//
+//	blockCount + floor((blockCount - 1) / chunkRatio)
+//
+// A differencing BAT holds whole chunks, because its last entry must locate the
+// sector bitmap of the chunk holding the last payload sector:
+//
+//	ceil(blockCount / chunkRatio) × (chunkRatio + 1)
+//
+// It returns 0 when blockCount or chunkRatio is 0.
+func VHDXBATEntryCount(blockCount, chunkRatio uint64, diskType types.DiskType) uint64 {
+	if blockCount == 0 || chunkRatio == 0 {
+		return 0
+	}
+	if diskType == types.DiskTypeDifferential {
+		return (blockCount + chunkRatio - 1) / chunkRatio * (chunkRatio + 1)
+	}
+	return blockCount + (blockCount-1)/chunkRatio
+}
+
+// ReadBATForDiskType reads the VHDX BAT from the specified offset and block
+// count, reading as many entries as VHDXBATEntryCount gives for diskType.
 // For VHDX, the block size should be obtained from metadata (typically 1MB or 32MB).
 // sectorSize is the logical sector size (typically 512 or 4096); pass 0 to default to 512.
 //
@@ -111,7 +137,32 @@ func NewVHDXBATParser(r io.ReaderAt) *VHDXBATParser {
 //	[data_0..data_(chunkRatio-1)] [sbitmap_0] [data_chunkRatio..] [sbitmap_1] ...
 //
 // where chunkRatio = (2^23 × logical_sector_size) / block_size.
+//
+// SectorBitmapOffsets has one element per chunk. An element is -1 when the
+// chunk's sector bitmap is not present, or when its entry lies beyond the end
+// of the BAT, which happens only to the last chunk of a fixed or dynamic disk.
+func (p *VHDXBATParser) ReadBATForDiskType(offset int64, blockCount, blockSize, sectorSize uint32, diskType types.DiskType) (*types.VHDXBlockAllocationTable, error) {
+	return p.readBAT(offset, blockCount, blockSize, sectorSize, func(blocks, chunkRatio uint64) uint64 {
+		return VHDXBATEntryCount(blocks, chunkRatio, diskType)
+	})
+}
+
+// ReadBAT reads the VHDX BAT from the specified offset and block count, reading
+// blockCount + ceil(blockCount/chunkRatio) entries whatever the disk type.
+//
+// Deprecated: That count is one more than a fixed or dynamic BAT needs, and for
+// a differencing disk whose block count is not a multiple of the chunk ratio it
+// stops short of the last chunk's sector bitmap entry. The bitmap is then
+// reported absent, and the sectors the disk holds in that chunk read from its
+// parent. Use ReadBATForDiskType.
 func (p *VHDXBATParser) ReadBAT(offset int64, blockCount uint32, blockSize uint32, sectorSize uint32) (*types.VHDXBlockAllocationTable, error) {
+	return p.readBAT(offset, blockCount, blockSize, sectorSize, func(blocks, chunkRatio uint64) uint64 {
+		return blocks + (blocks+chunkRatio-1)/chunkRatio
+	})
+}
+
+// readBAT reads a VHDX BAT of entries(blockCount, chunkRatio) raw entries.
+func (p *VHDXBATParser) readBAT(offset int64, blockCount, blockSize, sectorSize uint32, entries func(blocks, chunkRatio uint64) uint64) (*types.VHDXBlockAllocationTable, error) {
 	if blockCount == 0 {
 		return nil, errors.New("invalid block count")
 	}
@@ -133,10 +184,10 @@ func (p *VHDXBATParser) ReadBAT(offset int64, blockCount uint32, blockSize uint3
 	// Bitmap size = (chunkRatio * blockSize / sectorSize) / 8 bytes.
 	sectorBitmapSize := chunkRatio * uint64(blockSize) / uint64(sectorSize) / 8
 
-	// Total BAT entries = data blocks + sector bitmap entries.
-	// One sector bitmap entry is appended after every chunkRatio data blocks.
+	// One sector bitmap entry follows every chunkRatio data blocks. Whether the
+	// last chunk's entry is inside the BAT depends on the count being read.
 	sectorBitmapCount := (uint64(blockCount) + chunkRatio - 1) / chunkRatio
-	totalEntries := uint64(blockCount) + sectorBitmapCount
+	totalEntries := entries(uint64(blockCount), chunkRatio)
 
 	// Bulk-read all raw BAT entries in one I/O call.
 	rawBuf := make([]byte, totalEntries*8)

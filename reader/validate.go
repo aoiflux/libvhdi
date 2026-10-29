@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/aoiflux/libvhdi/bat"
 	"github.com/aoiflux/libvhdi/internal/binaryutil"
 	"github.com/aoiflux/libvhdi/types"
 )
@@ -296,8 +297,9 @@ func validateVHDXGeometry(m *types.MetadataValues, batOffset, batRegionSize, fil
 			ErrCorruptImage, m.BlockSize, m.LogicalSectorSize)
 	}
 
-	// Total entries = payload entries plus the interleaved sector bitmap ones.
-	totalEntries := blockCount + (blockCount+chunkRatio-1)/chunkRatio
+	// Total entries = payload entries plus the interleaved sector bitmap ones,
+	// counted as the BAT parser counts them so the check covers what is read.
+	totalEntries := bat.VHDXBATEntryCount(blockCount, chunkRatio, m.DiskType)
 	batBytes := totalEntries * 8
 	if batBytes > uint64(maxBATBytes) {
 		return fmt.Errorf("%w: block allocation table of %d bytes exceeds the %d byte limit (%d blocks)",

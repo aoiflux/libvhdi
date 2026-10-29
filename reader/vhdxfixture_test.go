@@ -30,9 +30,11 @@ const (
 	mb = 1024 * 1024
 
 	// The BAT region is sized to hold the largest table the fixtures need. A
-	// 4096-byte logical sector raises the chunk ratio to 32768, so the chunk-0
-	// sector bitmap entry sits at BAT index 32768 and the table runs to 256 KB.
-	vhdxBATRegionSize = 512 * 1024
+	// 4096-byte logical sector raises the chunk ratio to 32768, and a
+	// differencing BAT holds whole chunks (MS-VHDX 2.5), so the two-chunk 4K
+	// differencing fixture needs 2 x 32769 entries: 16 bytes more than 512 KB.
+	// The region fills the megabyte between the BAT and metadata offsets.
+	vhdxBATRegionSize = 1 * mb
 
 	vhdxBATRegionOff    = 1 * mb
 	vhdxMetaRegionOff   = 2 * mb
@@ -260,7 +262,7 @@ func writeVHDXBAT(img []byte, batOff int, p vhdxParams) {
 	chunkRatio := int((1 << 23) * uint64(p.sectorSize) / uint64(p.blockSize))
 	blockCount := int((p.virtualDiskSize + uint64(p.blockSize) - 1) / uint64(p.blockSize))
 
-	// The BAT region is 64 KB in this layout. A fixture describing an
+	// The BAT region is vhdxBATRegionSize in this layout. A fixture describing an
 	// implausibly large virtual disk cannot fit its whole table, which is the
 	// point of such a fixture, so entries beyond the region are dropped rather
 	// than written out of bounds.

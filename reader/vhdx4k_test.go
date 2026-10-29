@@ -30,8 +30,9 @@ const (
 	vhdx4kBlockSize  = 1 * mb
 	vhdx4kSectorSize = 4096
 
-	// chunkRatio is 32768 for these parameters, so the disk has to span more
-	// than 32768 blocks for the chunk-0 bitmap entry to exist at all.
+	// chunkRatio is 32768 for these parameters. The disk spans one block more
+	// than a chunk, which v0.4.1 needed to read the chunk-0 bitmap entry at
+	// all (PAR-33); it now also gives the disk a partial last chunk.
 	vhdx4kVirtual = uint64(32769) * mb
 )
 

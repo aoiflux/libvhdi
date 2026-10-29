@@ -259,6 +259,8 @@ func (br *VHDXBlockReader) readPartialBlock(dst []byte, blockFileOffset int64, b
 	}
 
 	// Process sector by sector, interleaving bitmap-checked reads with zero fills.
+	// dst[0] is block byte offsetInBlock, so dst[k] is read from block byte
+	// offsetInBlock+k. The first sector of an unaligned read starts partway in.
 	written := 0
 	for s := startSector; s < endSector; s++ {
 		sectorStart := int64(s)*int64(br.sectorSize) - offsetInBlock
@@ -278,7 +280,7 @@ func (br *VHDXBlockReader) readPartialBlock(dst []byte, blockFileOffset int64, b
 		allocated := (bitmapSlice[byteOff]>>bitOff)&1 == 1
 
 		if allocated {
-			if _, err := br.reader.ReadAt(chunk, blockFileOffset+int64(s)*int64(br.sectorSize)); err != nil {
+			if _, err := br.reader.ReadAt(chunk, blockFileOffset+offsetInBlock+sectorStart); err != nil {
 				return written, err
 			}
 		} else {
